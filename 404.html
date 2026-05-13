@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Redirecting...</title>
+  <script>
+    const base = new URL("./index.html", window.location.href);
+    if (window.location.search) {
+      base.search = window.location.search;
+    }
+    window.location.replace(base.toString());
+  </script>
+</head>
+<body>
+</body>
+</html>
