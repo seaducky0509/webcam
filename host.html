@@ -1,0 +1,2459 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MQTT 影像辨識監看平台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Microsoft JhengHei", "Segoe UI", sans-serif;
+      --bg: #08111f;
+      --panel: rgba(15, 23, 42, 0.92);
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --primary: #2563eb;
+      --primary-strong: #1d4ed8;
+      --success: #22c55e;
+      --warning: #facc15;
+      --danger: #ef4444;
+      --fence: #facc15;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, rgba(59, 130, 246, 0.16), transparent 28%),
+        radial-gradient(circle at right, rgba(250, 204, 21, 0.08), transparent 22%),
+        linear-gradient(180deg, #020617 0%, #0f172a 100%);
+      color: var(--text);
+    }
+
+    main {
+      width: min(1280px, calc(100vw - 24px));
+      margin: 0 auto;
+      padding: 24px 0 40px;
+      display: grid;
+      gap: 16px;
+    }
+
+    h1, h2, h3, p {
+      margin: 0;
+    }
+
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .hero h1 {
+      font-size: clamp(28px, 4vw, 42px);
+      line-height: 1.1;
+    }
+
+    .subtitle {
+      margin-top: 8px;
+      max-width: 860px;
+      line-height: 1.6;
+      color: #cbd5e1;
+    }
+
+    .badge {
+      padding: 9px 14px;
+      border: 1px solid rgba(96, 165, 250, 0.42);
+      background: rgba(15, 23, 42, 0.75);
+      color: #bfdbfe;
+      white-space: nowrap;
+      font-size: 13px;
+    }
+
+    .panel {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .config-grid,
+    .compact-grid,
+    .metrics-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .config-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      align-items: end;
+    }
+
+    .compact-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .metrics-grid {
+      grid-template-columns: 1.2fr 0.8fr;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+
+    .field label {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .field input,
+    .field select,
+    .field textarea {
+      width: 100%;
+      padding: 11px 12px;
+      border: 1px solid var(--border);
+      background: #020617;
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+    }
+
+    .field textarea {
+      min-height: 120px;
+      resize: vertical;
+      font-family: Consolas, "Courier New", monospace;
+      line-height: 1.4;
+    }
+
+    .field input:focus,
+    .field select:focus,
+    .field textarea:focus {
+      border-color: var(--primary);
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    button {
+      padding: 11px 16px;
+      border: 1px solid transparent;
+      background: linear-gradient(135deg, #3b82f6, var(--primary-strong));
+      color: #fff;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    button.secondary {
+      background: transparent;
+      border-color: #475569;
+      color: #cbd5e1;
+    }
+
+    button.ghost {
+      background: #0f172a;
+      border-color: #334155;
+      color: #cbd5e1;
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
+    .stage-shell {
+      display: grid;
+      gap: 12px;
+      justify-items: center;
+    }
+
+    .stage {
+      position: relative;
+      width: min(100%, var(--stage-width, 960px));
+      height: var(--stage-height, 540px);
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: #020617;
+    }
+
+    video, img, canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    video, img {
+      object-fit: cover;
+      background: #020617;
+    }
+
+    canvas {
+      pointer-events: none;
+    }
+
+    .status {
+      min-height: 24px;
+      font-size: 14px;
+      color: #93c5fd;
+    }
+
+    .status.success { color: #86efac; }
+    .status.warning { color: var(--warning); }
+    .status.error { color: #fca5a5; }
+
+    .stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    details.panel summary {
+      cursor: pointer;
+      font-size: 18px;
+      font-weight: 700;
+      list-style: none;
+    }
+
+    details.panel summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .class-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .class-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 14px;
+    }
+
+    .field-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .hint {
+      color: #fcd34d;
+      line-height: 1.6;
+      font-size: 13px;
+    }
+
+    dl {
+      margin: 0;
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 10px 14px;
+      font-size: 14px;
+    }
+
+    dt { color: var(--muted); }
+    dd { margin: 0; word-break: break-word; }
+
+    ul {
+      margin: 0;
+      padding-left: 18px;
+      font-size: 14px;
+    }
+
+    li + li {
+      margin-top: 8px;
+    }
+
+    .share-box {
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      background: #020617;
+      color: #bfdbfe;
+      word-break: break-all;
+      font-size: 14px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      background: #020617;
+      font-size: 13px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 980px) {
+      .config-grid,
+      .compact-grid,
+      .metrics-grid,
+      .field-row,
+      .class-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .stage {
+        width: 100%;
+        height: min(64vw, var(--stage-height, 540px));
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div>
+        <h1>MQTT 影像辨識監看平台</h1>
+        <p class="subtitle" id="pageIntro">本機可直接讀取 webcam 做物件辨識，再透過 MQTT 傳送影像與辨識結果；其他電腦或手機只要輸入相同 Broker、Port、Topic 就能監看。</p>
+      </div>
+      <div class="badge" id="modeBadge">主機模式</div>
+    </section>
+
+    <section class="panel">
+      <h2>MQTT 連線設定</h2>
+      <div class="config-grid">
+        <div class="field">
+          <label for="brokerInput">Broker Host (WSS)</label>
+          <input id="brokerInput" type="text" value="broker.emqx.io" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="portInput">Port</label>
+          <input id="portInput" type="text" value="8084" inputmode="numeric">
+        </div>
+        <div class="field">
+          <label for="topicInput">主題 Topic</label>
+          <input id="topicInput" type="text" value="vision/demo/cam01" spellcheck="false">
+        </div>
+        <div class="actions">
+          <button id="connectMqttButton" type="button">連線 MQTT</button>
+          <button id="disconnectMqttButton" type="button" class="secondary" disabled>中斷</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>監視畫面</h2>
+      <div class="compact-grid">
+        <div class="field">
+          <label for="stageWidthInput">畫面寬度（px）</label>
+          <input id="stageWidthInput" type="range" min="480" max="1280" step="20" value="960">
+          <div class="pill">目前寬度：<span id="stageWidthValue">960</span> px</div>
+        </div>
+        <div class="field">
+          <label for="stageHeightInput">畫面高度（px）</label>
+          <input id="stageHeightInput" type="range" min="270" max="900" step="10" value="540">
+          <div class="pill">目前高度：<span id="stageHeightValue">540</span> px</div>
+        </div>
+        <div class="field">
+          <label for="objectFitSelect">畫面填滿方式</label>
+          <select id="objectFitSelect">
+            <option value="cover">填滿</option>
+            <option value="contain">完整顯示</option>
+          </select>
+        </div>
+        <div class="actions" id="hostActions">
+          <button id="startButton" type="button" disabled>啟動 webcam</button>
+          <button id="stopButton" type="button" class="secondary" disabled>停止</button>
+        </div>
+      </div>
+
+      <div class="stage-shell">
+        <div class="stage" id="stage">
+          <video id="webcam" autoplay playsinline muted></video>
+          <img id="remoteFrame" alt="遠端影像" class="hidden">
+          <canvas id="overlay"></canvas>
+        </div>
+        <div class="status" id="status">系統初始化中...</div>
+      </div>
+    </section>
+
+    <details class="panel" open>
+      <summary>辨識類別設定</summary>
+      <div class="actions">
+        <button id="selectAllButton" type="button" class="ghost">全選</button>
+        <button id="clearAllButton" type="button" class="ghost">全部取消</button>
+        <div class="pill">目前選擇：<span id="selectedSummary">全部</span></div>
+      </div>
+      <div class="class-grid" id="classPickerList"></div>
+    </details>
+
+    <details class="panel" open>
+      <summary>電子圍籬設定</summary>
+      <div class="compact-grid">
+        <div class="field">
+          <label for="fenceEnabledSelect">電子圍籬</label>
+          <select id="fenceEnabledSelect">
+            <option value="on">啟用</option>
+            <option value="off">停用</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="fenceShapeSelect">圍籬形狀</label>
+          <select id="fenceShapeSelect">
+            <option value="rect">矩形</option>
+            <option value="polygon">多邊形</option>
+          </select>
+        </div>
+        <div class="actions">
+          <button id="presetRectButton" type="button" class="ghost">矩形預設</button>
+          <button id="presetPolygonButton" type="button" class="ghost">多邊形預設</button>
+          <button id="applyPolygonButton" type="button" class="ghost">套用多邊形</button>
+        </div>
+      </div>
+
+      <div class="compact-grid">
+        <label class="pill"><input id="editFenceToggle" type="checkbox"> 拖曳編輯圍籬</label>
+        <label class="pill"><input id="soundAlertToggle" type="checkbox" checked> 聲音警報</label>
+        <label class="pill"><input id="mqttAlertToggle" type="checkbox" checked> MQTT 告警訊息</label>
+        <div class="pill">拖曳模式啟用後，可直接在畫面上拖曳矩形角點或多邊形頂點。</div>
+      </div>
+
+      <div id="lineAlertPanel" class="stack">
+        <div class="compact-grid">
+          <label class="pill"><input id="lineAlertToggle" type="checkbox"> LINE 通知</label>
+          <label class="pill"><input id="lineClearToggle" type="checkbox" checked> 解除也通知</label>
+          <button id="sendLineTestButton" type="button" class="ghost">測試 LINE</button>
+          <div class="pill">主機端會把圍籬事件送到 GAS，再由 LINE Bot 發送訊息。</div>
+        </div>
+        <div class="field">
+          <label for="lineWebhookUrlInput">GAS Web App URL</label>
+          <input id="lineWebhookUrlInput" type="url" placeholder="https://script.google.com/macros/s/.../exec">
+        </div>
+        <div class="field">
+          <label for="lineSecretInput">Webhook 驗證碼（選填）</label>
+          <input id="lineSecretInput" type="password" placeholder="需與 GAS 內設定一致">
+        </div>
+      </div>
+
+      <div id="rectFenceControls" class="stack">
+        <div class="field-row">
+          <div class="field">
+            <label for="rectXInput">左上 X（%）</label>
+            <input id="rectXInput" type="number" min="0" max="95" step="1" value="18">
+          </div>
+          <div class="field">
+            <label for="rectYInput">左上 Y（%）</label>
+            <input id="rectYInput" type="number" min="0" max="95" step="1" value="18">
+          </div>
+          <div class="field">
+            <label for="rectWidthInput">寬度（%）</label>
+            <input id="rectWidthInput" type="number" min="5" max="100" step="1" value="64">
+          </div>
+          <div class="field">
+            <label for="rectHeightInput">高度（%）</label>
+            <input id="rectHeightInput" type="number" min="5" max="100" step="1" value="56">
+          </div>
+        </div>
+      </div>
+
+      <div id="polygonFenceControls" class="stack hidden">
+        <div class="field">
+          <label for="polygonPointsInput">多邊形頂點（每行一個座標，格式：x,y，範圍 0 到 100）</label>
+          <textarea id="polygonPointsInput">18,18
+82,18
+82,78
+18,78</textarea>
+        </div>
+      </div>
+
+      <p class="hint">電子圍籬以黃色顯示。當物件中心點進入圍籬內，物件框線、標籤與中心點會改為紅色，並統計圍籬內物件數量。</p>
+    </details>
+
+    <div class="metrics-grid">
+      <section class="panel">
+        <h2>系統狀態</h2>
+        <dl>
+          <dt>模式</dt>
+          <dd id="modeText">主機</dd>
+          <dt>模型狀態</dt>
+          <dd id="modelState">尚未載入</dd>
+          <dt>安全環境</dt>
+          <dd id="secureContext">檢查中</dd>
+          <dt>MediaDevices</dt>
+          <dd id="mediaDevicesSupport">檢查中</dd>
+          <dt>鏡頭權限</dt>
+          <dd id="cameraPermission">檢查中</dd>
+          <dt>可用攝影機</dt>
+          <dd id="videoInputs">檢查中</dd>
+          <dt>辨識狀態</dt>
+          <dd id="inferenceState">待命</dd>
+          <dt>MQTT 狀態</dt>
+          <dd id="syncState">未連線</dd>
+          <dt>LINE 通知</dt>
+          <dd id="lineStatusState">未啟用</dd>
+        </dl>
+
+        <div class="stack">
+          <div>
+            <h3>區網觀看網址</h3>
+            <div class="share-box" id="shareUrl">尚未產生</div>
+          </div>
+          <div>
+            <h3>外網觀看網址</h3>
+            <div class="share-box" id="publicUrl">尚未產生</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>辨識結果</h2>
+        <dl>
+          <dt>圍籬狀態</dt>
+          <dd id="fenceState">啟用 / 矩形</dd>
+          <dt>圍籬內數量</dt>
+          <dd id="insideCountState">0</dd>
+          <dt>最新告警</dt>
+          <dd id="alarmMessageState">尚未收到告警</dd>
+        </dl>
+        <ul id="detections">
+          <li>尚未收到辨識資料。</li>
+        </ul>
+        <p class="hint" id="hint">主機流程：先連線 MQTT，再啟動 webcam，允許相機權限後就會持續發送影像與辨識結果。</p>
+      </section>
+    </div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+  <script src="https://unpkg.com/mqtt@5.10.4/dist/mqtt.min.js"></script>
+  <script>
+    const translations = {
+      person: "人",
+      bicycle: "腳踏車",
+      car: "汽車",
+      motorcycle: "機車",
+      bus: "公車",
+      truck: "卡車",
+      cat: "貓",
+      dog: "狗",
+      chair: "椅子",
+      bottle: "瓶子",
+      "cell phone": "手機",
+      laptop: "筆記型電腦"
+    };
+
+    const classNames = [
+      "person", "bicycle", "car", "motorcycle", "bus", "truck", "cat", "dog", "chair", "bottle", "cell phone", "laptop"
+    ];
+
+    const STREAM_MAX_WIDTH = 854;
+    const STREAM_MAX_HEIGHT = 480;
+    const STREAM_JPEG_QUALITY = 0.42;
+    const HOST_SYNC_INTERVAL_MS = 600;
+    const VIEWER_MESSAGE_TIMEOUT_MS = 20000;
+    const params = new URLSearchParams(window.location.search);
+    const hostname = window.location.hostname;
+
+    const video = document.getElementById("webcam");
+    const remoteFrame = document.getElementById("remoteFrame");
+    const overlay = document.getElementById("overlay");
+    const overlayContext = overlay.getContext("2d");
+    const stage = document.getElementById("stage");
+    const statusText = document.getElementById("status");
+    const modeBadge = document.getElementById("modeBadge");
+    const pageIntro = document.getElementById("pageIntro");
+    const hintText = document.getElementById("hint");
+    const brokerInput = document.getElementById("brokerInput");
+    const portInput = document.getElementById("portInput");
+    const topicInput = document.getElementById("topicInput");
+    const connectMqttButton = document.getElementById("connectMqttButton");
+    const disconnectMqttButton = document.getElementById("disconnectMqttButton");
+    const stageWidthInput = document.getElementById("stageWidthInput");
+    const stageHeightInput = document.getElementById("stageHeightInput");
+    const stageWidthValue = document.getElementById("stageWidthValue");
+    const stageHeightValue = document.getElementById("stageHeightValue");
+    const objectFitSelect = document.getElementById("objectFitSelect");
+    const startButton = document.getElementById("startButton");
+    const stopButton = document.getElementById("stopButton");
+    const selectAllButton = document.getElementById("selectAllButton");
+    const clearAllButton = document.getElementById("clearAllButton");
+    const classPickerList = document.getElementById("classPickerList");
+    const selectedSummaryText = document.getElementById("selectedSummary");
+    const fenceEnabledSelect = document.getElementById("fenceEnabledSelect");
+    const fenceShapeSelect = document.getElementById("fenceShapeSelect");
+    const rectFenceControls = document.getElementById("rectFenceControls");
+    const polygonFenceControls = document.getElementById("polygonFenceControls");
+    const rectXInput = document.getElementById("rectXInput");
+    const rectYInput = document.getElementById("rectYInput");
+    const rectWidthInput = document.getElementById("rectWidthInput");
+    const rectHeightInput = document.getElementById("rectHeightInput");
+    const polygonPointsInput = document.getElementById("polygonPointsInput");
+    const presetRectButton = document.getElementById("presetRectButton");
+    const presetPolygonButton = document.getElementById("presetPolygonButton");
+    const applyPolygonButton = document.getElementById("applyPolygonButton");
+    const editFenceToggle = document.getElementById("editFenceToggle");
+    const soundAlertToggle = document.getElementById("soundAlertToggle");
+    const mqttAlertToggle = document.getElementById("mqttAlertToggle");
+    const lineAlertPanel = document.getElementById("lineAlertPanel");
+    const lineAlertToggle = document.getElementById("lineAlertToggle");
+    const lineClearToggle = document.getElementById("lineClearToggle");
+    const lineWebhookUrlInput = document.getElementById("lineWebhookUrlInput");
+    const lineSecretInput = document.getElementById("lineSecretInput");
+    const sendLineTestButton = document.getElementById("sendLineTestButton");
+    const modeText = document.getElementById("modeText");
+    const modelStateText = document.getElementById("modelState");
+    const secureContextText = document.getElementById("secureContext");
+    const mediaDevicesSupportText = document.getElementById("mediaDevicesSupport");
+    const cameraPermissionText = document.getElementById("cameraPermission");
+    const videoInputsText = document.getElementById("videoInputs");
+    const inferenceStateText = document.getElementById("inferenceState");
+    const syncStateText = document.getElementById("syncState");
+    const lineStatusStateText = document.getElementById("lineStatusState");
+    const fenceStateText = document.getElementById("fenceState");
+    const insideCountStateText = document.getElementById("insideCountState");
+    const alarmMessageStateText = document.getElementById("alarmMessageState");
+    const shareUrlText = document.getElementById("shareUrl");
+    const publicUrlText = document.getElementById("publicUrl");
+    const detectionsList = document.getElementById("detections");
+    const hostActions = document.getElementById("hostActions");
+
+    function isLoopbackHost(name) {
+      return name === "127.0.0.1" || name === "localhost";
+    }
+
+    function resolveMode() {
+      const requestedMode = params.get("mode");
+      if (requestedMode === "host" || requestedMode === "viewer") {
+        return requestedMode;
+      }
+      return "host";
+    }
+
+    const mode = resolveMode();
+
+    let model;
+    let stream;
+    let detectionLoopTimer;
+    let mqttClient;
+    let publishInFlight = false;
+    let lastInferenceAt = 0;
+    let lastPublishAt = 0;
+    let detectionRunning = false;
+    let latestHostItems = [];
+    let selectedClasses = new Set(classNames);
+    let latestViewerItems = [];
+    let latestViewerImageSize = { width: 0, height: 0 };
+    let latestPayloadTimestamp = "";
+    let viewerLastMessageAt = 0;
+    let viewerWatchdogTimer;
+    let mqttManualDisconnect = false;
+    let remoteFenceState = null;
+    let alarmActive = false;
+    let alarmBeepTimer;
+    let lastAlarmPublishAt = 0;
+    let dragState = null;
+    let controlPublishTimer;
+    let suppressControlEcho = false;
+    let audioContext;
+    let localControlRevisionCounter = 0;
+    let pendingControlRevision = 0;
+    let lastAppliedControlRevision = 0;
+    let lineNotifyInFlight = false;
+    let lineNotifyQueue = [];
+
+    const LINE_CONFIG_STORAGE_KEY = "mqtt-vision-line-config-v1";
+    const LINE_NOTIFY_MAX_RETRIES = 4;
+
+    const compositeCanvas = document.createElement("canvas");
+    const compositeContext = compositeCanvas.getContext("2d");
+    let lastLineSnapshotBase64 = "";
+    let lastLineSnapshotAt = 0;
+
+    brokerInput.value = params.get("broker") || brokerInput.value;
+    portInput.value = params.get("port") || portInput.value;
+    topicInput.value = params.get("topic") || topicInput.value;
+
+    const localFenceState = {
+      enabled: true,
+      shape: "rect",
+      rect: { x: 0.18, y: 0.18, width: 0.64, height: 0.56 },
+      points: [
+        { x: 0.18, y: 0.18 },
+        { x: 0.82, y: 0.18 },
+        { x: 0.82, y: 0.78 },
+        { x: 0.18, y: 0.78 }
+      ]
+    };
+
+    function translateClass(name) {
+      return translations[name] || name;
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function setStatus(message, kind = "info") {
+      statusText.textContent = message;
+      statusText.className = kind === "info" ? "status" : `status ${kind}`;
+    }
+
+    function formatTaipeiTime(value) {
+      if (!value) {
+        return "unknown";
+      }
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) {
+        return String(value);
+      }
+      return new Intl.DateTimeFormat("zh-TW", {
+        timeZone: "Asia/Taipei",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false
+      }).format(date).replace(/\//g, "-");
+    }
+
+    function updateLineStatus(message) {
+      lineStatusStateText.textContent = message;
+    }
+
+    function loadLineConfig() {
+      try {
+        const raw = localStorage.getItem(LINE_CONFIG_STORAGE_KEY);
+        if (!raw) {
+          return;
+        }
+        const config = JSON.parse(raw);
+        lineAlertToggle.checked = config.enabled === true;
+        lineClearToggle.checked = config.clearEnabled !== false;
+        lineWebhookUrlInput.value = typeof config.webhookUrl === "string" ? config.webhookUrl : "";
+        lineSecretInput.value = typeof config.secret === "string" ? config.secret : "";
+      } catch {
+        updateLineStatus("LINE 設定讀取失敗");
+      }
+    }
+
+    function saveLineConfig() {
+      try {
+        localStorage.setItem(LINE_CONFIG_STORAGE_KEY, JSON.stringify({
+          enabled: lineAlertToggle.checked,
+          clearEnabled: lineClearToggle.checked,
+          webhookUrl: lineWebhookUrlInput.value.trim(),
+          secret: lineSecretInput.value
+        }));
+      } catch {
+        updateLineStatus("LINE 設定無法儲存");
+      }
+    }
+
+    function buildLineEventPayload(eventType, insideCount, items, message, screenshotBase64 = "") {
+      const labels = [...new Set((items || []).map((item) => item.label || translateClass(item.class)).filter(Boolean))];
+      return {
+        eventId: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        eventType,
+        ts: new Date().toISOString(),
+        broker: brokerInput.value.trim(),
+        port: portInput.value.trim() || "8084",
+        topic: getTopic(),
+        cameraId: getTopic().split("/").pop() || "camera",
+        deviceName: getDeviceName(),
+        insideCount,
+        labels,
+        message,
+        screenshot: screenshotBase64
+          ? { mime: "image/jpeg", base64: screenshotBase64 }
+          : null
+      };
+    }
+
+    async function postLineWebhook(payload) {
+      const webhookUrl = lineWebhookUrlInput.value.trim();
+      if (!webhookUrl) {
+        throw new Error("missing-webhook-url");
+      }
+      const requestBody = {
+        ...payload,
+        secret: lineSecretInput.value
+      };
+      await fetch(webhookUrl, {
+        method: "POST",
+        mode: "no-cors",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8"
+        },
+        body: JSON.stringify(requestBody)
+      });
+    }
+
+    function describeLinePayload(payload) {
+      const size = payload.screenshot?.base64
+        ? Math.round((payload.screenshot.base64.length * 3 / 4) / 1024)
+        : 0;
+      return size > 0 ? `含截圖 ${size} KB` : "無截圖";
+    }
+
+    function pumpLineNotifyQueue() {
+      if (lineNotifyInFlight || !lineNotifyQueue.length) {
+        return;
+      }
+      lineNotifyInFlight = true;
+      const job = lineNotifyQueue[0];
+      postLineWebhook(job.payload).then(() => {
+        lineNotifyQueue.shift();
+        lineNotifyInFlight = false;
+        updateLineStatus(`已送出 LINE ${job.payload.eventType === "clear" ? "解除" : job.payload.eventType === "test" ? "測試" : "告警"}通知（${describeLinePayload(job.payload)}）`);
+        pumpLineNotifyQueue();
+      }).catch(() => {
+        job.attempt += 1;
+        lineNotifyInFlight = false;
+        if (job.attempt >= LINE_NOTIFY_MAX_RETRIES) {
+          lineNotifyQueue.shift();
+          updateLineStatus("LINE 通知送出失敗");
+          pumpLineNotifyQueue();
+          return;
+        }
+        const delay = Math.min(15000, 1000 * (2 ** (job.attempt - 1)));
+        updateLineStatus(`LINE 通知重試中（第 ${job.attempt + 1} 次）`);
+        window.setTimeout(pumpLineNotifyQueue, delay);
+      });
+    }
+
+    function enqueueLineNotify(payload) {
+      if (mode !== "host") {
+        return;
+      }
+      if (!lineAlertToggle.checked) {
+        updateLineStatus("LINE 通知已關閉");
+        return;
+      }
+      if (!lineWebhookUrlInput.value.trim()) {
+        updateLineStatus("請先填入 GAS Web App URL");
+        return;
+      }
+      lineNotifyQueue.push({ payload, attempt: 0 });
+      updateLineStatus(`LINE 通知排程中（${describeLinePayload(payload)}）`);
+      pumpLineNotifyQueue();
+    }
+
+    function getTopic() {
+      return topicInput.value.trim();
+    }
+
+    function getBrokerUrl() {
+      const host = brokerInput.value.trim();
+      const port = portInput.value.trim() || "8084";
+      return `wss://${host}:${port}/mqtt`;
+    }
+
+    function getDeviceName() {
+      const topic = getTopic();
+      const cameraId = topic.split("/").pop() || "camera";
+      return `${cameraId}-${mode}`;
+    }
+
+    function ensureAudioContext() {
+      if (!audioContext) {
+        const Context = window.AudioContext || window.webkitAudioContext;
+        if (!Context) {
+          return null;
+        }
+        audioContext = new Context();
+      }
+      if (audioContext.state === "suspended") {
+        audioContext.resume().catch(() => {});
+      }
+      return audioContext;
+    }
+
+    function playAlertBeep() {
+      if (!soundAlertToggle.checked) {
+        return;
+      }
+      const context = ensureAudioContext();
+      if (!context) {
+        return;
+      }
+      const oscillator = context.createOscillator();
+      const gainNode = context.createGain();
+      oscillator.type = "square";
+      oscillator.frequency.value = 880;
+      gainNode.gain.setValueAtTime(0.0001, context.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.16, context.currentTime + 0.02);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.28);
+      oscillator.connect(gainNode);
+      gainNode.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.3);
+    }
+
+    function setAlarmBeepActive(active) {
+      if (!soundAlertToggle.checked) {
+        active = false;
+      }
+      if (active) {
+        if (alarmBeepTimer) {
+          return;
+        }
+        playAlertBeep();
+        alarmBeepTimer = window.setInterval(playAlertBeep, 1000);
+        return;
+      }
+      if (alarmBeepTimer) {
+        clearInterval(alarmBeepTimer);
+        alarmBeepTimer = undefined;
+      }
+    }
+
+    function scheduleControlPublish() {
+      if (mode !== "viewer") {
+        return;
+      }
+      if (controlPublishTimer) {
+        clearTimeout(controlPublishTimer);
+      }
+      controlPublishTimer = window.setTimeout(() => {
+        publishControlState("遠端控制設定已更新。");
+      }, 120);
+    }
+
+    function updateOverlayEditMode() {
+      overlay.style.pointerEvents = editFenceToggle.checked ? "auto" : "none";
+      overlay.style.cursor = editFenceToggle.checked ? "crosshair" : "default";
+    }
+
+    function getNormalizedPointer(event) {
+      const rect = overlay.getBoundingClientRect();
+      return {
+        x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
+        y: clamp((event.clientY - rect.top) / rect.height, 0, 1)
+      };
+    }
+
+    function pickFenceHandle(point) {
+      const threshold = 18 / Math.max(overlay.width || 640, overlay.height || 360);
+      if (localFenceState.shape === "polygon" && localFenceState.points.length >= 3) {
+        for (let index = 0; index < localFenceState.points.length; index += 1) {
+          const candidate = localFenceState.points[index];
+          if (Math.hypot(point.x - candidate.x, point.y - candidate.y) <= threshold) {
+            return { type: "polygon-point", index };
+          }
+        }
+        return null;
+      }
+
+      const rect = localFenceState.rect;
+      const corners = {
+        tl: { x: rect.x, y: rect.y },
+        tr: { x: rect.x + rect.width, y: rect.y },
+        br: { x: rect.x + rect.width, y: rect.y + rect.height },
+        bl: { x: rect.x, y: rect.y + rect.height }
+      };
+
+      for (const [corner, cornerPoint] of Object.entries(corners)) {
+        if (Math.hypot(point.x - cornerPoint.x, point.y - cornerPoint.y) <= threshold) {
+          return { type: "rect-corner", corner };
+        }
+      }
+
+      if (point.x >= rect.x && point.x <= rect.x + rect.width && point.y >= rect.y && point.y <= rect.y + rect.height) {
+        return { type: "rect-body", offsetX: point.x - rect.x, offsetY: point.y - rect.y };
+      }
+      return null;
+    }
+
+    function applyDragPoint(point) {
+      if (!dragState) {
+        return;
+      }
+      if (dragState.type === "polygon-point") {
+        localFenceState.points[dragState.index] = {
+          x: clamp(point.x, 0, 1),
+          y: clamp(point.y, 0, 1)
+        };
+        syncFenceControlsFromState(localFenceState);
+        redrawCurrentOverlay();
+        scheduleControlPublish();
+        return;
+      }
+
+      const minSize = 0.05;
+      if (dragState.type === "rect-body") {
+        const nextX = clamp(point.x - dragState.offsetX, 0, 1 - localFenceState.rect.width);
+        const nextY = clamp(point.y - dragState.offsetY, 0, 1 - localFenceState.rect.height);
+        localFenceState.rect.x = nextX;
+        localFenceState.rect.y = nextY;
+      } else if (dragState.type === "rect-corner") {
+        const rect = localFenceState.rect;
+        const right = rect.x + rect.width;
+        const bottom = rect.y + rect.height;
+        let left = rect.x;
+        let top = rect.y;
+        let nextRight = right;
+        let nextBottom = bottom;
+
+        if (dragState.corner.includes("l")) {
+          left = clamp(point.x, 0, right - minSize);
+        }
+        if (dragState.corner.includes("r")) {
+          nextRight = clamp(point.x, left + minSize, 1);
+        }
+        if (dragState.corner.includes("t")) {
+          top = clamp(point.y, 0, bottom - minSize);
+        }
+        if (dragState.corner.includes("b")) {
+          nextBottom = clamp(point.y, top + minSize, 1);
+        }
+
+        localFenceState.rect.x = left;
+        localFenceState.rect.y = top;
+        localFenceState.rect.width = nextRight - left;
+        localFenceState.rect.height = nextBottom - top;
+      }
+
+      syncFenceControlsFromState(localFenceState);
+      redrawCurrentOverlay();
+      scheduleControlPublish();
+    }
+
+    function updateButtons(isRunning) {
+      if (mode !== "host") {
+        return;
+      }
+      startButton.disabled = !model || isRunning;
+      stopButton.disabled = !isRunning;
+    }
+
+    function updateSelectedSummary() {
+      if (selectedClasses.size === classNames.length) {
+        selectedSummaryText.textContent = "全部";
+        return;
+      }
+      if (selectedClasses.size === 0) {
+        selectedSummaryText.textContent = "未選擇";
+        return;
+      }
+      selectedSummaryText.textContent = classNames.filter((name) => selectedClasses.has(name)).map(translateClass).join("、");
+    }
+
+    function renderClassPicker() {
+      classPickerList.innerHTML = "";
+      for (const className of classNames) {
+        const label = document.createElement("label");
+        label.className = "class-item";
+
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = selectedClasses.has(className);
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) {
+            selectedClasses.add(className);
+          } else {
+            selectedClasses.delete(className);
+          }
+          updateSelectedSummary();
+          scheduleControlPublish();
+        });
+
+        const text = document.createElement("span");
+        text.textContent = translateClass(className);
+
+        label.appendChild(checkbox);
+        label.appendChild(text);
+        classPickerList.appendChild(label);
+      }
+      updateSelectedSummary();
+    }
+
+    function applyStageSize() {
+      const width = clamp(Number(stageWidthInput.value) || 960, 480, 1280);
+      const height = clamp(Number(stageHeightInput.value) || 540, 270, 900);
+      stage.style.setProperty("--stage-width", `${width}px`);
+      stage.style.setProperty("--stage-height", `${height}px`);
+      stageWidthValue.textContent = String(width);
+      stageHeightValue.textContent = String(height);
+    }
+
+    function applyObjectFit() {
+      const fit = objectFitSelect.value;
+      video.style.objectFit = fit;
+      remoteFrame.style.objectFit = fit;
+    }
+
+    function syncFenceControlsFromState(targetFence = localFenceState) {
+      fenceEnabledSelect.value = targetFence.enabled ? "on" : "off";
+      fenceShapeSelect.value = targetFence.shape || "rect";
+      rectFenceControls.classList.toggle("hidden", fenceShapeSelect.value !== "rect");
+      polygonFenceControls.classList.toggle("hidden", fenceShapeSelect.value !== "polygon");
+      rectXInput.value = String(Math.round((targetFence.rect?.x || 0) * 100));
+      rectYInput.value = String(Math.round((targetFence.rect?.y || 0) * 100));
+      rectWidthInput.value = String(Math.round((targetFence.rect?.width || 0.6) * 100));
+      rectHeightInput.value = String(Math.round((targetFence.rect?.height || 0.6) * 100));
+      polygonPointsInput.value = (targetFence.points || []).map((point) => `${Math.round(point.x * 100)},${Math.round(point.y * 100)}`).join("\n");
+      updateFenceStateText();
+    }
+
+    function parsePolygonPoints() {
+      const lines = polygonPointsInput.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      const points = [];
+      for (const line of lines) {
+        const [rawX, rawY] = line.split(",").map((part) => Number(part.trim()));
+        if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) {
+          continue;
+        }
+        points.push({
+          x: clamp(rawX / 100, 0, 1),
+          y: clamp(rawY / 100, 0, 1)
+        });
+      }
+      return points;
+    }
+
+    function normalizeFenceState(rawFence) {
+      if (!rawFence) {
+        return {
+          enabled: false,
+          shape: "rect",
+          rect: { ...localFenceState.rect },
+          points: [...localFenceState.points]
+        };
+      }
+      return {
+        enabled: rawFence.enabled !== false,
+        shape: rawFence.shape === "polygon" ? "polygon" : "rect",
+        rect: {
+          x: clamp(rawFence.rect?.x ?? localFenceState.rect.x, 0, 1),
+          y: clamp(rawFence.rect?.y ?? localFenceState.rect.y, 0, 1),
+          width: clamp(rawFence.rect?.width ?? localFenceState.rect.width, 0.05, 1),
+          height: clamp(rawFence.rect?.height ?? localFenceState.rect.height, 0.05, 1)
+        },
+        points: Array.isArray(rawFence.points) && rawFence.points.length >= 3
+          ? rawFence.points.map((point) => ({
+              x: clamp(point.x ?? 0, 0, 1),
+              y: clamp(point.y ?? 0, 0, 1)
+            }))
+          : [...localFenceState.points]
+      };
+    }
+
+    function readFenceStateFromControls() {
+      localFenceState.enabled = fenceEnabledSelect.value === "on";
+      localFenceState.shape = fenceShapeSelect.value === "polygon" ? "polygon" : "rect";
+      localFenceState.rect = {
+        x: clamp((Number(rectXInput.value) || 0) / 100, 0, 0.95),
+        y: clamp((Number(rectYInput.value) || 0) / 100, 0, 0.95),
+        width: clamp((Number(rectWidthInput.value) || 5) / 100, 0.05, 1),
+        height: clamp((Number(rectHeightInput.value) || 5) / 100, 0.05, 1)
+      };
+      localFenceState.points = parsePolygonPoints();
+      updateFenceStateText();
+      redrawCurrentOverlay();
+    }
+
+    function updateFenceStateText(fence = localFenceState) {
+      fenceStateText.textContent = `${fence.enabled ? "啟用" : "停用"} / ${fence.shape === "polygon" ? "多邊形" : "矩形"}`;
+    }
+
+    function getActiveFenceState() {
+      return mode === "viewer" && remoteFenceState ? remoteFenceState : localFenceState;
+    }
+
+    function pointInPolygon(point, points) {
+      let inside = false;
+      for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+        const xi = points[i].x;
+        const yi = points[i].y;
+        const xj = points[j].x;
+        const yj = points[j].y;
+        const intersect = ((yi > point.y) !== (yj > point.y)) &&
+          (point.x < ((xj - xi) * (point.y - yi)) / ((yj - yi) || 0.000001) + xi);
+        if (intersect) {
+          inside = !inside;
+        }
+      }
+      return inside;
+    }
+
+    function isPointInsideFence(point, fence) {
+      if (!fence || !fence.enabled) {
+        return false;
+      }
+      if (fence.shape === "polygon" && Array.isArray(fence.points) && fence.points.length >= 3) {
+        return pointInPolygon(point, fence.points);
+      }
+      const rect = fence.rect || localFenceState.rect;
+      return point.x >= rect.x && point.x <= rect.x + rect.width &&
+        point.y >= rect.y && point.y <= rect.y + rect.height;
+    }
+
+    function normalizeBBox(bbox, width, height) {
+      if (!Array.isArray(bbox) || bbox.length < 4 || !width || !height) {
+        return [0, 0, 0, 0];
+      }
+      const [x, y, boxWidth, boxHeight] = bbox;
+      if (Math.max(Math.abs(x), Math.abs(y), Math.abs(boxWidth), Math.abs(boxHeight)) <= 1.05) {
+        return [x, y, boxWidth, boxHeight];
+      }
+      return [x / width, y / height, boxWidth / width, boxHeight / height];
+    }
+
+    function toDetectionItem(prediction, sourceWidth, sourceHeight, fence = localFenceState) {
+      const normalizedBox = normalizeBBox(prediction.bbox, sourceWidth, sourceHeight);
+      const center = {
+        x: normalizedBox[0] + normalizedBox[2] / 2,
+        y: normalizedBox[1] + normalizedBox[3] / 2
+      };
+      return {
+        class: prediction.class,
+        label: translateClass(prediction.class),
+        score: prediction.score || 0,
+        bbox: normalizedBox,
+        center,
+        insideFence: isPointInsideFence(center, fence)
+      };
+    }
+
+    function setDetections(items) {
+      detectionsList.innerHTML = "";
+      if (!items.length) {
+        const item = document.createElement("li");
+        item.textContent = "尚未偵測到符合條件的物件。";
+        detectionsList.appendChild(item);
+        insideCountStateText.textContent = "0";
+        return;
+      }
+
+      const insideCount = items.filter((item) => item.insideFence).length;
+      insideCountStateText.textContent = String(insideCount);
+
+      for (const detection of items) {
+        const item = document.createElement("li");
+        const confidence = Math.round((detection.score || 0) * 100);
+        item.textContent = `${detection.label || translateClass(detection.class)}（${confidence}%）${detection.insideFence ? "｜圍籬內" : "｜圍籬外"}`;
+        item.style.color = detection.insideFence ? "#fca5a5" : "#e2e8f0";
+        detectionsList.appendChild(item);
+      }
+    }
+
+    function resizeOverlay(width, height) {
+      const targetWidth = width || Math.max(video.videoWidth, remoteFrame.naturalWidth, 640);
+      const targetHeight = height || Math.max(video.videoHeight, remoteFrame.naturalHeight, 360);
+      if (!targetWidth || !targetHeight) {
+        return;
+      }
+      if (overlay.width !== targetWidth || overlay.height !== targetHeight) {
+        overlay.width = targetWidth;
+        overlay.height = targetHeight;
+      }
+    }
+
+    function clearOverlay() {
+      overlayContext.clearRect(0, 0, overlay.width, overlay.height);
+    }
+
+    function drawFence(width, height, fence) {
+      if (!fence || !fence.enabled) {
+        return;
+      }
+
+      overlayContext.save();
+      overlayContext.strokeStyle = "#facc15";
+      overlayContext.fillStyle = "rgba(250, 204, 21, 0.08)";
+      overlayContext.lineWidth = 3;
+
+      if (fence.shape === "polygon" && Array.isArray(fence.points) && fence.points.length >= 3) {
+        overlayContext.beginPath();
+        fence.points.forEach((point, index) => {
+          const px = point.x * width;
+          const py = point.y * height;
+          if (index === 0) {
+            overlayContext.moveTo(px, py);
+          } else {
+            overlayContext.lineTo(px, py);
+          }
+        });
+        overlayContext.closePath();
+        overlayContext.fill();
+        overlayContext.stroke();
+      } else {
+        const rect = fence.rect || localFenceState.rect;
+        const x = rect.x * width;
+        const y = rect.y * height;
+        const rectWidth = rect.width * width;
+        const rectHeight = rect.height * height;
+        overlayContext.fillRect(x, y, rectWidth, rectHeight);
+        overlayContext.strokeRect(x, y, rectWidth, rectHeight);
+      }
+
+      overlayContext.fillStyle = "#facc15";
+      overlayContext.font = "bold 16px Microsoft JhengHei";
+      overlayContext.fillText("電子圍籬", 12, 24);
+
+      if (editFenceToggle.checked && fence === localFenceState) {
+        const handlePoints = fence.shape === "polygon" && fence.points.length >= 3
+          ? fence.points
+          : [
+              { x: fence.rect.x, y: fence.rect.y },
+              { x: fence.rect.x + fence.rect.width, y: fence.rect.y },
+              { x: fence.rect.x + fence.rect.width, y: fence.rect.y + fence.rect.height },
+              { x: fence.rect.x, y: fence.rect.y + fence.rect.height }
+            ];
+        overlayContext.fillStyle = "#fde68a";
+        for (const point of handlePoints) {
+          overlayContext.beginPath();
+          overlayContext.arc(point.x * width, point.y * height, 7, 0, Math.PI * 2);
+          overlayContext.fill();
+        }
+      }
+      overlayContext.restore();
+    }
+
+    function drawItems(items, sourceWidth, sourceHeight, fence) {
+      resizeOverlay(sourceWidth, sourceHeight);
+      clearOverlay();
+      drawFence(overlay.width, overlay.height, fence);
+
+      overlayContext.lineWidth = 2;
+      overlayContext.font = "16px Microsoft JhengHei";
+
+      for (const item of items) {
+        const [nx, ny, nWidth, nHeight] = item.bbox;
+        const x = nx * overlay.width;
+        const y = ny * overlay.height;
+        const boxWidth = nWidth * overlay.width;
+        const boxHeight = nHeight * overlay.height;
+        const centerX = (item.center?.x ?? (nx + nWidth / 2)) * overlay.width;
+        const centerY = (item.center?.y ?? (ny + nHeight / 2)) * overlay.height;
+        const confidence = Math.round((item.score || 0) * 100);
+        const label = `${item.label || translateClass(item.class)} ${confidence}%`;
+        const color = item.insideFence ? "#ef4444" : "#22c55e";
+        const textWidth = overlayContext.measureText(label).width;
+        const textHeight = 24;
+        const boxX = clamp(x, 0, Math.max(0, overlay.width - boxWidth));
+        const boxY = clamp(y, 0, Math.max(0, overlay.height - boxHeight));
+        const textX = clamp(boxX, 0, Math.max(0, overlay.width - textWidth - 12));
+        const textY = clamp(boxY - textHeight - 4, 0, Math.max(0, overlay.height - textHeight));
+
+        overlayContext.strokeStyle = color;
+        overlayContext.fillStyle = color;
+        overlayContext.strokeRect(boxX, boxY, boxWidth, boxHeight);
+        overlayContext.fillRect(textX, textY, textWidth + 12, textHeight);
+        overlayContext.fillStyle = "#020617";
+        overlayContext.fillText(label, textX + 6, textY + 17);
+
+        overlayContext.beginPath();
+        overlayContext.fillStyle = color;
+        overlayContext.arc(centerX, centerY, 5, 0, Math.PI * 2);
+        overlayContext.fill();
+      }
+    }
+
+    function drawLineSnapshotAnnotations(context, width, height, items, fence) {
+      if (fence && fence.enabled) {
+        context.save();
+        context.strokeStyle = "#facc15";
+        context.fillStyle = "rgba(250, 204, 21, 0.08)";
+        context.lineWidth = 3;
+        if (fence.shape === "polygon" && Array.isArray(fence.points) && fence.points.length >= 3) {
+          context.beginPath();
+          fence.points.forEach((point, index) => {
+            const x = point.x * width;
+            const y = point.y * height;
+            if (index === 0) {
+              context.moveTo(x, y);
+            } else {
+              context.lineTo(x, y);
+            }
+          });
+          context.closePath();
+          context.fill();
+          context.stroke();
+        } else {
+          const rect = fence.rect || localFenceState.rect;
+          context.fillRect(rect.x * width, rect.y * height, rect.width * width, rect.height * height);
+          context.strokeRect(rect.x * width, rect.y * height, rect.width * width, rect.height * height);
+        }
+        context.fillStyle = "#facc15";
+        context.font = "bold 18px Microsoft JhengHei";
+        context.fillText("電子圍籬", 14, 28);
+        context.restore();
+      }
+
+      context.save();
+      context.lineWidth = 3;
+      context.font = "18px Microsoft JhengHei";
+      for (const item of items) {
+        const [nx, ny, nWidth, nHeight] = item.bbox;
+        const x = nx * width;
+        const y = ny * height;
+        const boxWidth = nWidth * width;
+        const boxHeight = nHeight * height;
+        const centerX = (item.center?.x ?? (nx + nWidth / 2)) * width;
+        const centerY = (item.center?.y ?? (ny + nHeight / 2)) * height;
+        const color = item.insideFence ? "#ef4444" : "#22c55e";
+        const label = `${item.label || translateClass(item.class)} ${Math.round((item.score || 0) * 100)}%`;
+        const textWidth = context.measureText(label).width;
+        const textHeight = 26;
+        const textX = clamp(x, 0, Math.max(0, width - textWidth - 14));
+        const textY = clamp(y - textHeight - 4, 0, Math.max(0, height - textHeight));
+        context.strokeStyle = color;
+        context.fillStyle = color;
+        context.strokeRect(x, y, boxWidth, boxHeight);
+        context.fillRect(textX, textY, textWidth + 14, textHeight);
+        context.fillStyle = "#020617";
+        context.fillText(label, textX + 7, textY + 19);
+        context.beginPath();
+        context.fillStyle = color;
+        context.arc(centerX, centerY, 6, 0, Math.PI * 2);
+        context.fill();
+      }
+      context.restore();
+    }
+
+    function captureLineSnapshotBase64(items, fence) {
+      try {
+        const canUseVideo = video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0;
+        const canUseComposite = compositeCanvas.width > 0 && compositeCanvas.height > 0;
+        if (!canUseVideo && !canUseComposite) {
+          return lastLineSnapshotBase64;
+        }
+        const sourceWidth = canUseVideo ? video.videoWidth : compositeCanvas.width;
+        const sourceHeight = canUseVideo ? video.videoHeight : compositeCanvas.height;
+        const maxWidth = 640;
+        const scale = Math.min(1, maxWidth / sourceWidth);
+        const frameWidth = Math.max(1, Math.round(sourceWidth * scale));
+        const frameHeight = Math.max(1, Math.round(sourceHeight * scale));
+        const snapshotCanvas = document.createElement("canvas");
+        const snapshotContext = snapshotCanvas.getContext("2d");
+        snapshotCanvas.width = frameWidth;
+        snapshotCanvas.height = frameHeight;
+        if (canUseVideo) {
+          snapshotContext.drawImage(video, 0, 0, frameWidth, frameHeight);
+        } else {
+          snapshotContext.drawImage(compositeCanvas, 0, 0, frameWidth, frameHeight);
+        }
+        drawLineSnapshotAnnotations(snapshotContext, frameWidth, frameHeight, items, fence);
+        const base64 = snapshotCanvas.toDataURL("image/jpeg", 0.62).split(",")[1] || "";
+        if (base64) {
+          lastLineSnapshotBase64 = base64;
+          lastLineSnapshotAt = Date.now();
+        }
+        return base64 || lastLineSnapshotBase64;
+      } catch {
+        return lastLineSnapshotBase64;
+      }
+    }
+
+    function redrawCurrentOverlay() {
+      if (mode === "host") {
+        const width = video.videoWidth || overlay.width || 640;
+        const height = video.videoHeight || overlay.height || 360;
+        drawItems(latestHostItems, width, height, localFenceState);
+        return;
+      }
+      if (!latestViewerItems.length) {
+        clearOverlay();
+        drawFence(overlay.width || 640, overlay.height || 360, getActiveFenceState());
+        return;
+      }
+      drawItems(
+        latestViewerItems,
+        latestViewerImageSize.width || remoteFrame.naturalWidth,
+        latestViewerImageSize.height || remoteFrame.naturalHeight,
+        getActiveFenceState()
+      );
+    }
+
+    function updateMqttState(connected) {
+      connectMqttButton.disabled = connected;
+      disconnectMqttButton.disabled = !connected;
+      brokerInput.disabled = connected;
+      portInput.disabled = connected;
+      topicInput.disabled = connected;
+      syncStateText.textContent = connected ? "已連線" : "未連線";
+    }
+
+    function buildViewerUrlFromBase(baseUrl) {
+      const url = new URL(baseUrl);
+      if (url.pathname.endsWith("/")) {
+        url.pathname = `${url.pathname}viewer.html`;
+      } else {
+        url.pathname = url.pathname.replace(/\/[^/]*$/, "/viewer.html");
+      }
+      url.search = "";
+      url.searchParams.set("broker", brokerInput.value.trim());
+      url.searchParams.set("port", portInput.value.trim() || "8084");
+      url.searchParams.set("topic", getTopic());
+      return url.toString();
+    }
+
+    function buildShareUrl() {
+      const url = new URL(window.location.href);
+      if (url.pathname.endsWith("/")) {
+        url.pathname = `${url.pathname}viewer.html`;
+      } else {
+        url.pathname = url.pathname.replace(/\/[^/]*$/, "/viewer.html");
+      }
+      url.search = "";
+      url.searchParams.set("broker", brokerInput.value.trim());
+      url.searchParams.set("port", portInput.value.trim() || "8084");
+      url.searchParams.set("topic", getTopic());
+      return url.toString();
+    }
+
+    async function hydrateShareUrls() {
+      if (isLoopbackHost(window.location.hostname)) {
+        try {
+          const response = await fetch("/api/host-info", { cache: "no-store" });
+          const hostInfo = await response.json();
+          const lanHost = Array.isArray(hostInfo.ips) && hostInfo.ips.length ? hostInfo.ips[0] : window.location.hostname;
+          shareUrlText.textContent = buildViewerUrlFromBase(`http://${lanHost}:${hostInfo.port}/`);
+        } catch {
+          shareUrlText.textContent = buildShareUrl();
+        }
+      } else {
+        shareUrlText.textContent = buildShareUrl();
+      }
+
+      try {
+        const response = await fetch("/public-url", { cache: "no-store" });
+        if (response.ok) {
+          const publicBase = (await response.text()).trim();
+          publicUrlText.textContent = publicBase ? buildViewerUrlFromBase(publicBase) : "尚未提供";
+        } else {
+          publicUrlText.textContent = "尚未提供";
+        }
+      } catch {
+        publicUrlText.textContent = "尚未提供";
+      }
+    }
+
+    function serializeFence(fence) {
+      return {
+        enabled: fence.enabled,
+        shape: fence.shape,
+        rect: { ...fence.rect },
+        points: fence.points.map((point) => ({ ...point }))
+      };
+    }
+
+    function buildControlPayload() {
+      const revision = ++localControlRevisionCounter;
+      pendingControlRevision = revision;
+      return {
+        type: "control",
+        ts: new Date().toISOString(),
+        source: getDeviceName(),
+        revision,
+        control: {
+          selectedClasses: classNames.filter((name) => selectedClasses.has(name)),
+          fence: serializeFence(localFenceState),
+          mqttAlertEnabled: mqttAlertToggle.checked,
+          lineAlertEnabled: lineAlertToggle.checked,
+          lineClearEnabled: lineClearToggle.checked
+        }
+      };
+    }
+
+    function publishControlState(statusMessage) {
+      if (!mqttClient || !mqttClient.connected) {
+        return;
+      }
+      try {
+        mqttClient.publish(getTopic(), JSON.stringify(buildControlPayload()), { qos: 1, retain: false });
+        if (statusMessage) {
+          setStatus(statusMessage, "success");
+        }
+      } catch {
+        setStatus("控制設定送出失敗。", "error");
+      }
+    }
+
+    function buildPayload(frameBase64, frameWidth, frameHeight, items, fence, message) {
+      return {
+        type: "frame",
+        cameraId: getTopic().split("/").pop() || "camera",
+        deviceName: getDeviceName(),
+        ts: new Date().toISOString(),
+        image: {
+          mime: "image/jpeg",
+          width: frameWidth,
+          height: frameHeight,
+          base64: frameBase64
+        },
+        detect: {
+          model: "coco-ssd",
+          selectedClasses: classNames.filter((name) => selectedClasses.has(name)),
+          items
+        },
+        fence: {
+          ...serializeFence(fence),
+          insideCount: items.filter((item) => item.insideFence).length
+        },
+        alerts: {
+          mqttEnabled: mqttAlertToggle.checked,
+          lineEnabled: lineAlertToggle.checked,
+          lineClearEnabled: lineClearToggle.checked
+        },
+        controlState: {
+          revision: lastAppliedControlRevision,
+          pendingRevision: pendingControlRevision || 0
+        },
+        view: {
+          width: Number(stageWidthInput.value) || 960,
+          height: Number(stageHeightInput.value) || 540,
+          fit: objectFitSelect.value
+        },
+        status: {
+          isActive: true,
+          message
+        }
+      };
+    }
+
+    function buildInactivePayload() {
+      return {
+        type: "frame",
+        cameraId: getTopic().split("/").pop() || "camera",
+        deviceName: getDeviceName(),
+        ts: new Date().toISOString(),
+        image: {
+          mime: "image/jpeg",
+          width: 0,
+          height: 0,
+          base64: ""
+        },
+        detect: {
+          model: "coco-ssd",
+          selectedClasses: classNames.filter((name) => selectedClasses.has(name)),
+          items: []
+        },
+        fence: {
+          ...serializeFence(localFenceState),
+          insideCount: 0
+        },
+        alerts: {
+          mqttEnabled: mqttAlertToggle.checked,
+          lineEnabled: lineAlertToggle.checked,
+          lineClearEnabled: lineClearToggle.checked
+        },
+        controlState: {
+          revision: lastAppliedControlRevision,
+          pendingRevision: pendingControlRevision || 0
+        },
+        view: {
+          width: Number(stageWidthInput.value) || 960,
+          height: Number(stageHeightInput.value) || 540,
+          fit: objectFitSelect.value
+        },
+        status: {
+          isActive: false,
+          message: "主機目前未傳送影像。"
+        }
+      };
+    }
+
+    function normalizeIncomingPayload(payload) {
+      if (!payload) {
+        return null;
+      }
+
+      if (typeof payload === "string") {
+        return {
+          type: "frame",
+          ts: new Date().toISOString(),
+          image: { mime: "image/jpeg", width: 0, height: 0, base64: payload },
+          detect: { model: "external", selectedClasses: [], items: [] },
+          fence: { ...serializeFence(localFenceState), insideCount: 0, enabled: false },
+          alerts: { mqttEnabled: true, lineEnabled: false, lineClearEnabled: true },
+          controlState: { revision: 0, pendingRevision: 0 },
+          status: { isActive: true, message: "已收到遠端影像。" }
+        };
+      }
+
+      if (payload.type === "frame") {
+        return payload;
+      }
+
+      const base64 = payload.frameBase64 || payload.imageBase64 || payload.base64 || (payload.image && payload.image.base64) || "";
+      if (!base64) {
+        return null;
+      }
+
+      const detections = payload.detections || payload.detectItems || (payload.detect && payload.detect.items) || [];
+      const imageWidth = payload.width || (payload.image && payload.image.width) || 0;
+      const imageHeight = payload.height || (payload.image && payload.image.height) || 0;
+
+      return {
+        type: "frame",
+        ts: payload.ts || payload.updatedAt || new Date().toISOString(),
+        image: {
+          mime: payload.mime || (payload.image && payload.image.mime) || "image/jpeg",
+          width: imageWidth,
+          height: imageHeight,
+          base64
+        },
+        detect: {
+          model: payload.model || (payload.detect && payload.detect.model) || "external",
+          selectedClasses: payload.selectedClasses || (payload.detect && payload.detect.selectedClasses) || [],
+          items: detections
+        },
+        fence: payload.fence || { ...serializeFence(localFenceState), insideCount: 0, enabled: false },
+        alerts: payload.alerts || { mqttEnabled: true, lineEnabled: false, lineClearEnabled: true },
+        controlState: payload.controlState || { revision: 0, pendingRevision: 0 },
+        status: {
+          isActive: payload.isActive !== false && (!(payload.status) || payload.status.isActive !== false),
+          message: payload.statusMessage || (payload.status && payload.status.message) || "已收到遠端影像。"
+        }
+      };
+    }
+
+    function normalizeIncomingItems(items, imageWidth, imageHeight, fence) {
+      return (items || []).map((item) => {
+        const label = item.label || translateClass(item.class);
+        const bbox = normalizeBBox(item.bbox, imageWidth || 1, imageHeight || 1);
+        const center = item.center && Number.isFinite(item.center.x) && Number.isFinite(item.center.y)
+          ? {
+              x: item.center.x > 1 ? item.center.x / (imageWidth || 1) : item.center.x,
+              y: item.center.y > 1 ? item.center.y / (imageHeight || 1) : item.center.y
+            }
+          : { x: bbox[0] + bbox[2] / 2, y: bbox[1] + bbox[3] / 2 };
+        return {
+          class: item.class || "unknown",
+          label,
+          score: item.score || 0,
+          bbox,
+          center,
+          insideFence: typeof item.insideFence === "boolean" ? item.insideFence : isPointInsideFence(center, fence)
+        };
+      });
+    }
+
+    function updateAlarmState(isInside, message) {
+      setAlarmBeepActive(isInside);
+      alarmActive = isInside;
+      if (message) {
+        alarmMessageStateText.textContent = message;
+        setStatus(isInside ? message : "影像辨識中", isInside ? "warning" : "success");
+      }
+    }
+
+    function maybePublishAlarm(items, fence, lineSnapshotBase64 = "") {
+      const insideCount = items.filter((item) => item.insideFence).length;
+      const nextActive = insideCount > 0;
+      const wasActive = alarmActive;
+      const message = nextActive ? `電子圍籬內出現 ${insideCount} 個目標。` : "電子圍籬內已無目標。";
+      updateAlarmState(nextActive, message);
+      if (nextActive && !wasActive) {
+        const snapshot = lineSnapshotBase64 || captureLineSnapshotBase64(items, fence);
+        enqueueLineNotify(buildLineEventPayload("enter", insideCount, items, message, snapshot));
+      } else if (!nextActive && wasActive && lineClearToggle.checked) {
+        enqueueLineNotify(buildLineEventPayload("clear", 0, items, message));
+      }
+      if (nextActive && mqttAlertToggle.checked && mqttClient && mqttClient.connected) {
+        const now = Date.now();
+        if (now - lastAlarmPublishAt >= 500) {
+          const payload = {
+            type: "alarm",
+            ts: new Date().toISOString(),
+            source: getDeviceName(),
+            alarm: {
+              active: true,
+              insideCount,
+              message
+            }
+          };
+          mqttClient.publish(getTopic(), JSON.stringify(payload), { qos: 1, retain: false });
+          lastAlarmPublishAt = now;
+        }
+      } else if (!nextActive && wasActive && mqttAlertToggle.checked && mqttClient && mqttClient.connected) {
+        const payload = {
+          type: "alarm",
+          ts: new Date().toISOString(),
+          source: getDeviceName(),
+          alarm: {
+            active: false,
+            insideCount: 0,
+            message
+          }
+        };
+        mqttClient.publish(getTopic(), JSON.stringify(payload), { qos: 1, retain: false });
+        lastAlarmPublishAt = 0;
+      }
+    }
+
+    function applyControlPayload(payload) {
+      if (typeof payload.revision === "number") {
+        lastAppliedControlRevision = payload.revision;
+        if (payload.revision >= pendingControlRevision) {
+          pendingControlRevision = 0;
+        }
+      }
+      const control = payload.control || {};
+      if (Array.isArray(control.selectedClasses)) {
+        selectedClasses = new Set(control.selectedClasses.filter((name) => classNames.includes(name)));
+        renderClassPicker();
+      }
+      if (control.fence) {
+        const nextFence = normalizeFenceState(control.fence);
+        localFenceState.enabled = nextFence.enabled;
+        localFenceState.shape = nextFence.shape;
+        localFenceState.rect = { ...nextFence.rect };
+        localFenceState.points = nextFence.points.map((point) => ({ ...point }));
+        syncFenceControlsFromState(localFenceState);
+      }
+      if (typeof control.mqttAlertEnabled === "boolean") {
+        mqttAlertToggle.checked = control.mqttAlertEnabled;
+      }
+      if (typeof control.lineAlertEnabled === "boolean") {
+        lineAlertToggle.checked = control.lineAlertEnabled;
+        saveLineConfig();
+        updateLineStatus(lineAlertToggle.checked ? (lineWebhookUrlInput.value.trim() ? "待命中" : "請填入 GAS Web App URL") : "未啟用");
+      }
+      if (typeof control.lineClearEnabled === "boolean") {
+        lineClearToggle.checked = control.lineClearEnabled;
+        saveLineConfig();
+      }
+      redrawCurrentOverlay();
+      setStatus("已套用遠端控制設定。", "success");
+    }
+
+    function handleAlarmPayload(payload) {
+      const alarm = payload.alarm || {};
+      const isActive = alarm.active !== false && Number(alarm.insideCount || 0) > 0;
+      updateAlarmState(isActive, alarm.message || (isActive ? "電子圍籬內有目標。" : "電子圍籬警報已解除。"));
+      if (typeof alarm.insideCount === "number") {
+        insideCountStateText.textContent = String(alarm.insideCount);
+      }
+      if (!isActive && !alarm.message) {
+        alarmMessageStateText.textContent = "電子圍籬警報已解除。";
+      }
+    }
+
+    function applyIncomingPayload(rawPayload) {
+      const payload = normalizeIncomingPayload(rawPayload);
+      if (!payload) {
+        setStatus("收到 MQTT 訊息，但其中沒有影像資料。", "warning");
+        return;
+      }
+      viewerLastMessageAt = Date.now();
+
+      const timestamp = payload.ts || "";
+      if (timestamp && timestamp === latestPayloadTimestamp) {
+        return;
+      }
+      latestPayloadTimestamp = timestamp;
+
+      const image = payload.image || {};
+      const status = payload.status || {};
+      const incomingFence = normalizeFenceState(payload.fence || localFenceState);
+      if (payload.alerts && typeof payload.alerts.mqttEnabled === "boolean") {
+        mqttAlertToggle.checked = payload.alerts.mqttEnabled;
+      }
+      if (payload.alerts && typeof payload.alerts.lineEnabled === "boolean") {
+        lineAlertToggle.checked = payload.alerts.lineEnabled;
+      }
+      if (payload.alerts && typeof payload.alerts.lineClearEnabled === "boolean") {
+        lineClearToggle.checked = payload.alerts.lineClearEnabled;
+      }
+      const items = normalizeIncomingItems(payload.detect?.items || [], image.width, image.height, incomingFence);
+      const incomingRevision = Number(payload.controlState?.revision || 0);
+      remoteFenceState = incomingFence;
+      if (payload.alerts && typeof payload.alerts.mqttEnabled === "boolean") {
+        mqttAlertToggle.checked = payload.alerts.mqttEnabled;
+      }
+      if (incomingRevision > lastAppliedControlRevision) {
+        lastAppliedControlRevision = incomingRevision;
+      }
+      const canApplyRemoteControl = !pendingControlRevision || incomingRevision >= pendingControlRevision;
+      const displayFence = canApplyRemoteControl ? incomingFence : localFenceState;
+      const displayItems = canApplyRemoteControl
+        ? items
+        : normalizeIncomingItems(payload.detect?.items || [], image.width, image.height, localFenceState);
+      if (canApplyRemoteControl) {
+        if (pendingControlRevision && incomingRevision >= pendingControlRevision) {
+          pendingControlRevision = 0;
+        }
+        selectedClasses = new Set(Array.isArray(payload.detect?.selectedClasses) ? payload.detect.selectedClasses : classNames);
+        renderClassPicker();
+        syncFenceControlsFromState(incomingFence);
+      }
+      setDetections(displayItems);
+      updateAlarmState((payload.fence?.insideCount ?? displayItems.filter((item) => item.insideFence).length) > 0, "");
+      inferenceStateText.textContent = status.isActive ? "接收中" : "待命";
+      setStatus(status.message || "已收到遠端影像。", status.isActive ? "success" : "warning");
+      insideCountStateText.textContent = String(payload.fence?.insideCount ?? displayItems.filter((item) => item.insideFence).length);
+      updateFenceStateText(displayFence);
+
+      if (!status.isActive || !image.base64) {
+        remoteFrame.removeAttribute("src");
+        latestViewerItems = [];
+        latestViewerImageSize = { width: 0, height: 0 };
+        clearOverlay();
+        drawFence(overlay.width || 640, overlay.height || 360, displayFence);
+        return;
+      }
+
+      latestViewerItems = displayItems;
+      latestViewerImageSize = {
+        width: image.width || 0,
+        height: image.height || 0
+      };
+      remoteFrame.src = `data:${image.mime || "image/jpeg"};base64,${image.base64}`;
+    }
+
+    function connectMqtt() {
+      const broker = brokerInput.value.trim();
+      const topic = getTopic();
+      if (!broker || !topic) {
+        setStatus("請先輸入 Broker 與 Topic。", "error");
+        return;
+      }
+
+      if (mqttClient) {
+        mqttClient.end(true);
+      }
+      mqttManualDisconnect = false;
+
+      setStatus("正在連線 MQTT broker...", "info");
+      syncStateText.textContent = "連線中";
+      const connectOptions = {
+        clean: true,
+        keepalive: 30,
+        connectTimeout: 10000,
+        reconnectPeriod: 3000
+      };
+      if (mode === "host") {
+        connectOptions.will = {
+          topic,
+          payload: JSON.stringify(buildInactivePayload()),
+          qos: 1,
+          retain: true
+        };
+      }
+
+      mqttClient = mqtt.connect(getBrokerUrl(), connectOptions);
+
+      mqttClient.on("connect", () => {
+        updateMqttState(true);
+        hydrateShareUrls();
+        if (mode === "viewer") {
+          viewerLastMessageAt = Date.now();
+          setStatus(`MQTT 已連線：${topic}`, "success");
+        } else {
+          setStatus(`MQTT 已連線：${topic}。接著可啟動 webcam。`, "success");
+        }
+        mqttClient.subscribe(topic, { qos: 1 }, (error) => {
+          if (error) {
+            syncStateText.textContent = "訂閱失敗";
+            setStatus("MQTT Topic 訂閱失敗。", "error");
+            return;
+          }
+          syncStateText.textContent = "已訂閱";
+        });
+      });
+
+      mqttClient.on("message", (_topic, message) => {
+        let parsed;
+        try {
+          parsed = JSON.parse(message.toString());
+        } catch {
+          parsed = message.toString();
+        }
+
+        if (parsed && typeof parsed === "object" && parsed.type === "control") {
+          if (parsed.source !== getDeviceName()) {
+            applyControlPayload(parsed);
+          }
+          return;
+        }
+
+        if (parsed && typeof parsed === "object" && parsed.type === "alarm") {
+          if (mode === "viewer" && parsed.source !== getDeviceName()) {
+            handleAlarmPayload(parsed);
+          }
+          return;
+        }
+
+        if (mode !== "viewer") {
+          return;
+        }
+
+        applyIncomingPayload(parsed);
+      });
+
+      mqttClient.on("reconnect", () => {
+        syncStateText.textContent = "重新連線中";
+        setStatus("MQTT 連線中斷，正在自動重連...", "warning");
+      });
+
+      mqttClient.on("close", () => {
+        updateMqttState(false);
+        if (!mqttManualDisconnect) {
+          setStatus("MQTT 連線已關閉，等待自動重連...", "warning");
+        }
+      });
+
+      mqttClient.on("error", (error) => {
+        syncStateText.textContent = "錯誤";
+        const reason = error && error.message ? error.message : "unknown";
+        setStatus(`MQTT 連線失敗：${reason}`, "error");
+      });
+    }
+
+    function disconnectMqtt() {
+      mqttManualDisconnect = true;
+      if (mqttClient) {
+        mqttClient.end(true);
+        mqttClient = undefined;
+      }
+      updateMqttState(false);
+      setStatus("MQTT 已中斷。");
+    }
+
+    function scheduleNextDetection(delayMs) {
+      if (!detectionRunning) {
+        return;
+      }
+      detectionLoopTimer = window.setTimeout(runDetectionLoop, delayMs);
+    }
+
+    async function publishCurrentState(payload) {
+      if (!mqttClient || !mqttClient.connected) {
+        syncStateText.textContent = "未連線";
+        return;
+      }
+      try {
+        mqttClient.publish(getTopic(), JSON.stringify(payload), { qos: 1, retain: true });
+        syncStateText.textContent = "已發送";
+      } catch {
+        syncStateText.textContent = "發送失敗";
+      }
+    }
+
+    async function pushCurrentFrame(items, fence) {
+      const now = performance.now();
+      if (publishInFlight || now - lastPublishAt < HOST_SYNC_INTERVAL_MS) {
+        return;
+      }
+      publishInFlight = true;
+      lastPublishAt = now;
+
+      const sourceWidth = video.videoWidth || overlay.width || 640;
+      const sourceHeight = video.videoHeight || overlay.height || 360;
+      const scale = Math.min(1, STREAM_MAX_WIDTH / sourceWidth, STREAM_MAX_HEIGHT / sourceHeight);
+      const frameWidth = Math.max(1, Math.round(sourceWidth * scale));
+      const frameHeight = Math.max(1, Math.round(sourceHeight * scale));
+
+      if (compositeCanvas.width !== frameWidth || compositeCanvas.height !== frameHeight) {
+        compositeCanvas.width = frameWidth;
+        compositeCanvas.height = frameHeight;
+      }
+
+      compositeContext.clearRect(0, 0, frameWidth, frameHeight);
+      compositeContext.drawImage(video, 0, 0, frameWidth, frameHeight);
+      const dataUrl = compositeCanvas.toDataURL("image/jpeg", STREAM_JPEG_QUALITY);
+      const frameBase64 = dataUrl.split(",")[1] || "";
+      if (frameBase64) {
+        lastLineSnapshotBase64 = frameBase64;
+        lastLineSnapshotAt = Date.now();
+      }
+      const payload = buildPayload(frameBase64, frameWidth, frameHeight, items, fence, "影像辨識中");
+      await publishCurrentState(payload);
+      publishInFlight = false;
+    }
+
+    async function runDetectionLoop() {
+      if (!detectionRunning) {
+        return;
+      }
+
+      if (!model || !stream || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+        scheduleNextDetection(120);
+        return;
+      }
+
+      const now = performance.now();
+      if (now - lastInferenceAt < 140) {
+        scheduleNextDetection(30);
+        return;
+      }
+
+      lastInferenceAt = now;
+      inferenceStateText.textContent = "辨識中";
+
+      try {
+        const predictions = await model.detect(video);
+        const filtered = predictions.filter((prediction) => prediction.score >= 0.55 && selectedClasses.has(prediction.class));
+        const fence = normalizeFenceState(localFenceState);
+        const items = filtered.map((prediction) => toDetectionItem(prediction, video.videoWidth, video.videoHeight, fence));
+        latestHostItems = items;
+        drawItems(items, video.videoWidth, video.videoHeight, fence);
+        setDetections(items);
+        const lineSnapshot = captureLineSnapshotBase64(items, fence);
+        maybePublishAlarm(items, fence, lineSnapshot);
+        inferenceStateText.textContent = items.length ? "已找到目標" : "未找到目標";
+        await pushCurrentFrame(items, fence);
+      } catch {
+        inferenceStateText.textContent = "辨識失敗";
+      }
+
+      scheduleNextDetection(30);
+    }
+
+    function publishInactiveState() {
+      if (!mqttClient || !mqttClient.connected) {
+        return;
+      }
+      mqttClient.publish(getTopic(), JSON.stringify(buildInactivePayload()), { qos: 1, retain: true });
+    }
+
+    function startViewerWatchdog() {
+      if (viewerWatchdogTimer) {
+        clearInterval(viewerWatchdogTimer);
+      }
+      viewerWatchdogTimer = window.setInterval(() => {
+        if (mode !== "viewer" || mqttManualDisconnect) {
+          return;
+        }
+        if (!mqttClient || !mqttClient.connected) {
+          return;
+        }
+        if (!viewerLastMessageAt) {
+          return;
+        }
+        if (Date.now() - viewerLastMessageAt < VIEWER_MESSAGE_TIMEOUT_MS) {
+          return;
+        }
+        setStatus("長時間沒有收到新畫面，正在強制重新連線 MQTT...", "warning");
+        viewerLastMessageAt = Date.now();
+        mqttClient.end(true);
+      }, 5000);
+    }
+
+    function stopWebcam() {
+      detectionRunning = false;
+      if (detectionLoopTimer) {
+        clearTimeout(detectionLoopTimer);
+        detectionLoopTimer = undefined;
+      }
+      if (stream) {
+        for (const track of stream.getTracks()) {
+          track.stop();
+        }
+      }
+      stream = undefined;
+      video.srcObject = null;
+      clearOverlay();
+      drawFence(overlay.width || 640, overlay.height || 360, localFenceState);
+      latestHostItems = [];
+      setDetections([]);
+      alarmActive = false;
+      setAlarmBeepActive(false);
+      alarmMessageStateText.textContent = "尚未收到告警";
+      inferenceStateText.textContent = "待命";
+      setStatus("Webcam 已停止。");
+      updateButtons(false);
+      publishInactiveState();
+    }
+
+    function describeError(error) {
+      const name = error && error.name ? error.name : "UnknownError";
+      const message = error && error.message ? error.message : "";
+      if (!window.isSecureContext && !isLoopbackHost(hostname)) {
+        return "Webcam 需要在 localhost、HTTPS 或安全 tunnel 下使用。";
+      }
+      if (name === "NotAllowedError") {
+        return "相機權限被拒絕。";
+      }
+      if (name === "NotFoundError") {
+        return "找不到可用 webcam。";
+      }
+      if (name === "NotReadableError") {
+        return "webcam 可能被其他程式占用。";
+      }
+      return `啟動 webcam 失敗：${name}${message ? ` - ${message}` : ""}`;
+    }
+
+    async function refreshDiagnostics() {
+      secureContextText.textContent = window.isSecureContext ? "是" : "否";
+      mediaDevicesSupportText.textContent = navigator.mediaDevices ? "支援" : "不支援";
+
+      if (!navigator.mediaDevices) {
+        cameraPermissionText.textContent = "不適用";
+        videoInputsText.textContent = "不適用";
+        return;
+      }
+
+      if (navigator.permissions && navigator.permissions.query) {
+        try {
+          const permission = await navigator.permissions.query({ name: "camera" });
+          const map = { granted: "允許", denied: "拒絕", prompt: "尚未決定" };
+          cameraPermissionText.textContent = map[permission.state] || permission.state;
+        } catch {
+          cameraPermissionText.textContent = "未知";
+        }
+      } else {
+        cameraPermissionText.textContent = "未知";
+      }
+
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoInputs = devices.filter((device) => device.kind === "videoinput");
+        videoInputsText.textContent = String(videoInputs.length);
+      } catch {
+        videoInputsText.textContent = "讀取失敗";
+      }
+    }
+
+    async function startWebcam() {
+      if (mode !== "host") {
+        setStatus("觀看端不會啟動本機 webcam。", "warning");
+        return;
+      }
+      if (!window.isSecureContext && !isLoopbackHost(hostname)) {
+        setStatus("請使用 localhost、HTTPS 或安全 tunnel 來啟動 webcam。", "error");
+        return;
+      }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setStatus("這個瀏覽器不支援 webcam。", "error");
+        return;
+      }
+
+      try {
+        setStatus("正在啟動 webcam...", "info");
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+        detectionRunning = true;
+        updateButtons(true);
+        setStatus("webcam 已啟動，影像辨識與 MQTT 發送中。", "success");
+        runDetectionLoop();
+        await refreshDiagnostics();
+      } catch (error) {
+        updateButtons(false);
+        setStatus(describeError(error), "error");
+        await refreshDiagnostics();
+      }
+    }
+
+    async function loadModel() {
+      if (mode !== "host") {
+        modelStateText.textContent = "觀看端待命";
+        setStatus(`等待 Topic：${getTopic()} 的 MQTT 畫面。`, "info");
+        return;
+      }
+      modelStateText.textContent = "載入中";
+      setStatus("正在載入 coco-ssd 模型...", "info");
+      try {
+        model = await cocoSsd.load({ base: "lite_mobilenet_v2" });
+        modelStateText.textContent = "就緒";
+        setStatus(mqttClient && mqttClient.connected ? "模型已就緒，可啟動 webcam。" : "模型已就緒，請先連線 MQTT 再啟動 webcam。", "success");
+        startButton.disabled = false;
+      } catch {
+        modelStateText.textContent = "失敗";
+        setStatus("模型載入失敗，請檢查 CDN 是否可用。", "error");
+      }
+    }
+
+    function applyMode() {
+      lineAlertPanel.classList.toggle("hidden", mode !== "host");
+      modeText.textContent = mode === "host" ? "主機" : "觀看端";
+      if (mode === "viewer") {
+        modeBadge.textContent = "觀看端模式";
+        pageIntro.textContent = "觀看端只訂閱 MQTT，並顯示最新影像、辨識框、辨識文字與電子圍籬結果。";
+        video.classList.add("hidden");
+        remoteFrame.classList.remove("hidden");
+        hostActions.classList.add("hidden");
+        hintText.textContent = "觀看端不會在本機執行辨識，只接收 MQTT 傳來的結果。";
+      } else {
+        modeBadge.textContent = "主機模式";
+        remoteFrame.classList.add("hidden");
+        video.classList.remove("hidden");
+        updateLineStatus(lineAlertToggle.checked ? (lineWebhookUrlInput.value.trim() ? "待命中" : "請填入 GAS Web App URL") : "未啟用");
+        hintText.textContent = "主機流程：連線 MQTT、啟動 webcam、允許相機權限，之後就會持續發送辨識結果。";
+      }
+    }
+
+    selectAllButton.addEventListener("click", () => {
+      selectedClasses = new Set(classNames);
+      renderClassPicker();
+      scheduleControlPublish();
+    });
+
+    clearAllButton.addEventListener("click", () => {
+      selectedClasses = new Set();
+      renderClassPicker();
+      scheduleControlPublish();
+    });
+
+    [stageWidthInput, stageHeightInput].forEach((input) => {
+      input.addEventListener("input", applyStageSize);
+      input.addEventListener("change", applyStageSize);
+    });
+
+    objectFitSelect.addEventListener("change", () => {
+      applyObjectFit();
+      redrawCurrentOverlay();
+    });
+
+    [fenceEnabledSelect, fenceShapeSelect, rectXInput, rectYInput, rectWidthInput, rectHeightInput].forEach((input) => {
+      input.addEventListener("change", () => {
+        rectFenceControls.classList.toggle("hidden", fenceShapeSelect.value !== "rect");
+        polygonFenceControls.classList.toggle("hidden", fenceShapeSelect.value !== "polygon");
+        readFenceStateFromControls();
+        scheduleControlPublish();
+      });
+    });
+
+    polygonPointsInput.addEventListener("change", () => {
+      readFenceStateFromControls();
+      scheduleControlPublish();
+    });
+    applyPolygonButton.addEventListener("click", () => {
+      readFenceStateFromControls();
+      scheduleControlPublish();
+    });
+
+    presetRectButton.addEventListener("click", () => {
+      localFenceState.enabled = true;
+      localFenceState.shape = "rect";
+      localFenceState.rect = { x: 0.18, y: 0.18, width: 0.64, height: 0.56 };
+      syncFenceControlsFromState(localFenceState);
+      redrawCurrentOverlay();
+      scheduleControlPublish();
+    });
+
+    presetPolygonButton.addEventListener("click", () => {
+      localFenceState.enabled = true;
+      localFenceState.shape = "polygon";
+      localFenceState.points = [
+        { x: 0.12, y: 0.22 },
+        { x: 0.5, y: 0.12 },
+        { x: 0.86, y: 0.24 },
+        { x: 0.78, y: 0.8 },
+        { x: 0.24, y: 0.86 }
+      ];
+      syncFenceControlsFromState(localFenceState);
+      redrawCurrentOverlay();
+      scheduleControlPublish();
+    });
+
+    soundAlertToggle.addEventListener("change", () => {
+      if (soundAlertToggle.checked) {
+        ensureAudioContext();
+        if (alarmActive) {
+          setAlarmBeepActive(true);
+        }
+      } else {
+        setAlarmBeepActive(false);
+      }
+    });
+
+    mqttAlertToggle.addEventListener("change", scheduleControlPublish);
+    [lineAlertToggle, lineClearToggle].forEach((input) => {
+      input.addEventListener("change", () => {
+        saveLineConfig();
+        updateLineStatus(lineAlertToggle.checked ? (lineWebhookUrlInput.value.trim() ? "待命中" : "請填入 GAS Web App URL") : "未啟用");
+      });
+    });
+    [lineWebhookUrlInput, lineSecretInput].forEach((input) => {
+      input.addEventListener("change", () => {
+        saveLineConfig();
+        updateLineStatus(lineAlertToggle.checked ? (lineWebhookUrlInput.value.trim() ? "待命中" : "請填入 GAS Web App URL") : "未啟用");
+      });
+    });
+    sendLineTestButton.addEventListener("click", () => {
+      const activeFence = getActiveFenceState();
+      const insideCount = latestHostItems.filter((item) => item.insideFence).length;
+      const snapshot = captureLineSnapshotBase64(latestHostItems, activeFence);
+      enqueueLineNotify(buildLineEventPayload("test", insideCount, latestHostItems, snapshot ? "LINE 測試通知（含截圖）" : "LINE 測試通知", snapshot));
+    });
+    editFenceToggle.addEventListener("change", updateOverlayEditMode);
+
+    startButton.addEventListener("click", startWebcam);
+    stopButton.addEventListener("click", stopWebcam);
+    connectMqttButton.addEventListener("click", connectMqtt);
+    disconnectMqttButton.addEventListener("click", disconnectMqtt);
+    brokerInput.addEventListener("change", hydrateShareUrls);
+    portInput.addEventListener("change", hydrateShareUrls);
+    topicInput.addEventListener("change", hydrateShareUrls);
+
+    remoteFrame.addEventListener("load", () => {
+      if (mode !== "viewer") {
+        return;
+      }
+      drawItems(
+        latestViewerItems,
+        latestViewerImageSize.width || remoteFrame.naturalWidth,
+        latestViewerImageSize.height || remoteFrame.naturalHeight,
+        getActiveFenceState()
+      );
+    });
+
+    overlay.addEventListener("pointerdown", (event) => {
+      if (!editFenceToggle.checked) {
+        return;
+      }
+      const point = getNormalizedPointer(event);
+      const handle = pickFenceHandle(point);
+      if (!handle) {
+        return;
+      }
+      dragState = handle.type === "rect-body"
+        ? { ...handle }
+        : handle;
+      overlay.setPointerCapture(event.pointerId);
+    });
+
+    overlay.addEventListener("pointermove", (event) => {
+      if (!dragState) {
+        return;
+      }
+      applyDragPoint(getNormalizedPointer(event));
+    });
+
+    function clearDragState() {
+      dragState = null;
+    }
+
+    overlay.addEventListener("pointerup", clearDragState);
+    overlay.addEventListener("pointercancel", clearDragState);
+
+    window.addEventListener("beforeunload", () => {
+      if (mode === "host") {
+        stopWebcam();
+      }
+      if (mqttClient) {
+        mqttClient.end(true);
+      }
+    });
+
+    loadLineConfig();
+    applyMode();
+    renderClassPicker();
+    applyStageSize();
+    applyObjectFit();
+    syncFenceControlsFromState(localFenceState);
+    updateOverlayEditMode();
+    refreshDiagnostics();
+    hydrateShareUrls();
+    loadModel();
+    connectMqtt();
+    startViewerWatchdog();
+    drawFence(640, 360, localFenceState);
+  </script>
+</body>
+</html>
