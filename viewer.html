@@ -1,0 +1,1365 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MQTT 觀看端</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Microsoft JhengHei", "Segoe UI", sans-serif;
+      --panel: rgba(15, 23, 42, 0.92);
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --primary: #2563eb;
+      --primary-strong: #1d4ed8;
+      --warning: #facc15;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, rgba(59, 130, 246, 0.16), transparent 28%),
+        linear-gradient(180deg, #020617 0%, #0f172a 100%);
+      color: var(--text);
+    }
+    main {
+      width: min(1240px, calc(100vw - 24px));
+      margin: 0 auto;
+      padding: 24px 0 40px;
+      display: grid;
+      gap: 16px;
+    }
+    h1, h2, p { margin: 0; }
+    .panel {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+    .config-grid, .compact-grid, .metrics-grid, .class-grid, .field-row {
+      display: grid;
+      gap: 12px;
+    }
+    .config-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: end; }
+    .compact-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .metrics-grid { grid-template-columns: 1.1fr 0.9fr; }
+    .class-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .field-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .field { display: grid; gap: 6px; }
+    .field label { color: var(--muted); font-size: 13px; }
+    .field input, .field select, .field textarea {
+      width: 100%;
+      padding: 11px 12px;
+      border: 1px solid var(--border);
+      background: #020617;
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+    }
+    .field textarea {
+      min-height: 120px;
+      resize: vertical;
+      font-family: Consolas, "Courier New", monospace;
+      line-height: 1.4;
+    }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    button {
+      padding: 11px 16px;
+      border: 1px solid transparent;
+      background: linear-gradient(135deg, #3b82f6, var(--primary-strong));
+      color: #fff;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button.secondary {
+      background: transparent;
+      border-color: #475569;
+      color: #cbd5e1;
+    }
+    button.ghost {
+      background: #0f172a;
+      border-color: #334155;
+      color: #cbd5e1;
+    }
+    button:disabled { opacity: 0.55; cursor: default; }
+    .stage-shell { display: grid; gap: 12px; justify-items: center; }
+    .stage {
+      position: relative;
+      width: min(100%, var(--stage-width, 960px));
+      height: var(--stage-height, 540px);
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: #020617;
+    }
+    img, canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    img { object-fit: cover; background: #020617; }
+    canvas { pointer-events: none; }
+    .status { min-height: 24px; font-size: 14px; color: #93c5fd; }
+    .status.warning { color: var(--warning); }
+    .status.error { color: #fca5a5; }
+    .status.success { color: #86efac; }
+    dl {
+      margin: 0;
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 10px 14px;
+      font-size: 14px;
+    }
+    dt { color: var(--muted); }
+    dd { margin: 0; word-break: break-word; }
+    ul {
+      margin: 0;
+      padding-left: 18px;
+      font-size: 14px;
+    }
+    li + li { margin-top: 8px; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      background: #020617;
+      font-size: 13px;
+    }
+    .hint { color: #fcd34d; line-height: 1.6; font-size: 13px; }
+    .stack { display: grid; gap: 10px; }
+    .class-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 14px;
+    }
+    .hidden { display: none !important; }
+    @media (max-width: 980px) {
+      .config-grid, .compact-grid, .metrics-grid, .class-grid, .field-row { grid-template-columns: 1fr; }
+      .stage { width: 100%; height: min(64vw, var(--stage-height, 540px)); }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="panel">
+      <h1>MQTT 觀看端</h1>
+      <p>外網監控端可直接透過 MQTT 接收本機影像、辨識結果與電子圍籬資訊，也能把圍籬與辨識類別設定回傳到主機端。</p>
+    </section>
+
+    <section class="panel">
+      <h2>MQTT 連線設定</h2>
+      <div class="config-grid">
+        <div class="field">
+          <label for="brokerInput">Broker Host (WSS)</label>
+          <input id="brokerInput" type="text" value="broker.emqx.io" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="portInput">Port</label>
+          <input id="portInput" type="text" value="8084" inputmode="numeric">
+        </div>
+        <div class="field">
+          <label for="topicInput">主題 Topic</label>
+          <input id="topicInput" type="text" value="vision/demo/cam01" spellcheck="false">
+        </div>
+        <div class="actions">
+          <button id="connectButton" type="button">連線 MQTT</button>
+          <button id="disconnectButton" type="button" class="secondary" disabled>中斷</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>畫面顯示設定</h2>
+      <div class="compact-grid">
+        <div class="field">
+          <label for="stageWidthInput">畫面寬度（px）</label>
+          <input id="stageWidthInput" type="range" min="480" max="1280" step="20" value="960">
+          <div class="pill">目前寬度：<span id="stageWidthValue">960</span> px</div>
+        </div>
+        <div class="field">
+          <label for="stageHeightInput">畫面高度（px）</label>
+          <input id="stageHeightInput" type="range" min="270" max="900" step="10" value="540">
+          <div class="pill">目前高度：<span id="stageHeightValue">540</span> px</div>
+        </div>
+        <div class="field">
+          <label for="objectFitSelect">畫面填滿方式</label>
+          <select id="objectFitSelect">
+            <option value="cover">填滿</option>
+            <option value="contain">完整顯示</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <details class="panel" open>
+      <summary>辨識類別設定</summary>
+      <div class="actions">
+        <button id="selectAllButton" type="button">全選</button>
+        <button id="clearAllButton" type="button" class="secondary">全部取消</button>
+        <div class="pill">目前選擇：<span id="selectedSummary">全部</span></div>
+      </div>
+      <div class="class-grid" id="classPickerList"></div>
+    </details>
+
+    <details class="panel" open>
+      <summary>電子圍籬與告警設定</summary>
+      <div class="compact-grid">
+        <div class="field">
+          <label for="fenceEnabledSelect">電子圍籬</label>
+          <select id="fenceEnabledSelect">
+            <option value="on">啟用</option>
+            <option value="off">停用</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="fenceShapeSelect">圍籬形狀</label>
+          <select id="fenceShapeSelect">
+            <option value="rect">矩形</option>
+            <option value="polygon">多邊形</option>
+          </select>
+        </div>
+        <div class="actions">
+          <button id="presetRectButton" type="button" class="ghost">矩形預設</button>
+          <button id="presetPolygonButton" type="button" class="ghost">多邊形預設</button>
+          <button id="applyPolygonButton" type="button" class="ghost">套用多邊形</button>
+        </div>
+      </div>
+
+      <div class="compact-grid">
+        <label class="pill"><input id="editFenceToggle" type="checkbox"> 拖曳編輯圍籬</label>
+        <label class="pill"><input id="soundAlertToggle" type="checkbox" checked> 聲音警報</label>
+        <label class="pill"><input id="mqttAlertToggle" type="checkbox" checked> MQTT 告警訊息</label>
+      </div>
+
+      <div class="compact-grid">
+        <label class="pill"><input id="lineAlertToggle" type="checkbox"> LINE 通知</label>
+        <label class="pill"><input id="lineClearToggle" type="checkbox" checked> LINE 解除通知</label>
+      </div>
+
+      <div id="rectFenceControls" class="stack">
+        <div class="field-row">
+          <div class="field">
+            <label for="rectXInput">左上 X（%）</label>
+            <input id="rectXInput" type="number" min="0" max="95" step="1" value="18">
+          </div>
+          <div class="field">
+            <label for="rectYInput">左上 Y（%）</label>
+            <input id="rectYInput" type="number" min="0" max="95" step="1" value="18">
+          </div>
+          <div class="field">
+            <label for="rectWidthInput">寬度（%）</label>
+            <input id="rectWidthInput" type="number" min="5" max="100" step="1" value="64">
+          </div>
+          <div class="field">
+            <label for="rectHeightInput">高度（%）</label>
+            <input id="rectHeightInput" type="number" min="5" max="100" step="1" value="56">
+          </div>
+        </div>
+      </div>
+
+      <div id="polygonFenceControls" class="stack hidden">
+        <div class="field">
+          <label for="polygonPointsInput">多邊形頂點（每行一個座標，格式：x,y，範圍 0 到 100）</label>
+          <textarea id="polygonPointsInput">18,18
+82,18
+82,78
+18,78</textarea>
+        </div>
+      </div>
+    </details>
+
+    <section class="panel">
+      <div class="stage-shell">
+        <div class="stage" id="stage">
+          <img id="frame" alt="MQTT 影像">
+          <canvas id="overlay"></canvas>
+        </div>
+        <div class="status" id="status">等待 MQTT 畫面...</div>
+      </div>
+    </section>
+
+    <div class="metrics-grid">
+      <section class="panel">
+        <h2>系統狀態</h2>
+        <dl>
+          <dt>MQTT</dt>
+          <dd id="mqttState">未連線</dd>
+          <dt>Topic</dt>
+          <dd id="topicState">vision/demo/cam01</dd>
+          <dt>最後更新</dt>
+          <dd id="updatedAt">waiting</dd>
+          <dt>模型</dt>
+          <dd id="modelState">unknown</dd>
+          <dt>來源裝置</dt>
+          <dd id="deviceState">unknown</dd>
+        </dl>
+      </section>
+
+      <section class="panel">
+        <h2>辨識結果</h2>
+        <dl>
+          <dt>圍籬狀態</dt>
+          <dd id="fenceState">未知</dd>
+          <dt>圍籬內數量</dt>
+          <dd id="insideCountState">0</dd>
+          <dt>最新告警</dt>
+          <dd id="alarmMessageState">尚未收到告警</dd>
+        </dl>
+        <ul id="detections">
+          <li>尚未收到辨識資料。</li>
+        </ul>
+        <p class="hint">觀看端修改的圍籬、辨識類別與 MQTT 告警設定，會透過同一個 Topic 回傳到主機端。</p>
+      </section>
+    </div>
+  </main>
+
+  <script src="https://unpkg.com/mqtt@5.10.4/dist/mqtt.min.js"></script>
+  <script>
+    const translations = {
+      person: "人",
+      bicycle: "腳踏車",
+      car: "汽車",
+      motorcycle: "機車",
+      bus: "公車",
+      truck: "卡車",
+      cat: "貓",
+      dog: "狗",
+      chair: "椅子",
+      bottle: "瓶子",
+      "cell phone": "手機",
+      laptop: "筆記型電腦"
+    };
+    const classNames = [
+      "person", "bicycle", "car", "motorcycle", "bus", "truck", "cat", "dog", "chair", "bottle", "cell phone", "laptop"
+    ];
+    const params = new URLSearchParams(window.location.search);
+    const MESSAGE_TIMEOUT_MS = 20000;
+    const STORE_KEYS = {
+      broker: "mqttViewer.broker",
+      port: "mqttViewer.port",
+      topic: "mqttViewer.topic",
+      stageWidth: "mqttViewer.stageWidth",
+      stageHeight: "mqttViewer.stageHeight",
+      objectFit: "mqttViewer.objectFit"
+    };
+
+    const brokerInput = document.getElementById("brokerInput");
+    const portInput = document.getElementById("portInput");
+    const topicInput = document.getElementById("topicInput");
+    const connectButton = document.getElementById("connectButton");
+    const disconnectButton = document.getElementById("disconnectButton");
+    const stage = document.getElementById("stage");
+    const stageWidthInput = document.getElementById("stageWidthInput");
+    const stageHeightInput = document.getElementById("stageHeightInput");
+    const stageWidthValue = document.getElementById("stageWidthValue");
+    const stageHeightValue = document.getElementById("stageHeightValue");
+    const objectFitSelect = document.getElementById("objectFitSelect");
+    const selectAllButton = document.getElementById("selectAllButton");
+    const clearAllButton = document.getElementById("clearAllButton");
+    const classPickerList = document.getElementById("classPickerList");
+    const selectedSummaryText = document.getElementById("selectedSummary");
+    const fenceEnabledSelect = document.getElementById("fenceEnabledSelect");
+    const fenceShapeSelect = document.getElementById("fenceShapeSelect");
+    const rectFenceControls = document.getElementById("rectFenceControls");
+    const polygonFenceControls = document.getElementById("polygonFenceControls");
+    const rectXInput = document.getElementById("rectXInput");
+    const rectYInput = document.getElementById("rectYInput");
+    const rectWidthInput = document.getElementById("rectWidthInput");
+    const rectHeightInput = document.getElementById("rectHeightInput");
+    const polygonPointsInput = document.getElementById("polygonPointsInput");
+    const presetRectButton = document.getElementById("presetRectButton");
+    const presetPolygonButton = document.getElementById("presetPolygonButton");
+    const applyPolygonButton = document.getElementById("applyPolygonButton");
+    const editFenceToggle = document.getElementById("editFenceToggle");
+    const soundAlertToggle = document.getElementById("soundAlertToggle");
+    const mqttAlertToggle = document.getElementById("mqttAlertToggle");
+    const lineAlertToggle = document.getElementById("lineAlertToggle");
+    const lineClearToggle = document.getElementById("lineClearToggle");
+    const frame = document.getElementById("frame");
+    const overlay = document.getElementById("overlay");
+    const overlayContext = overlay.getContext("2d");
+    const statusText = document.getElementById("status");
+    const mqttStateText = document.getElementById("mqttState");
+    const topicStateText = document.getElementById("topicState");
+    const updatedAtText = document.getElementById("updatedAt");
+    const modelStateText = document.getElementById("modelState");
+    const deviceStateText = document.getElementById("deviceState");
+    const fenceStateText = document.getElementById("fenceState");
+    const insideCountStateText = document.getElementById("insideCountState");
+    const alarmMessageStateText = document.getElementById("alarmMessageState");
+    const detectionsList = document.getElementById("detections");
+
+    let mqttClient;
+    let latestItems = [];
+    let latestFence = null;
+    let latestImageSize = { width: 0, height: 0 };
+    let latestTimestamp = "";
+    let selectedClasses = new Set(classNames);
+    let mqttManualDisconnect = false;
+    let lastMessageAt = 0;
+    let watchdogTimer;
+    let controlPublishTimer;
+    let dragState = null;
+    let alarmActive = false;
+    let alarmBeepTimer;
+    let audioContext;
+    let localControlRevisionCounter = 0;
+    let pendingControlRevision = 0;
+    let lastAppliedControlRevision = 0;
+
+    const localFenceState = {
+      enabled: true,
+      shape: "rect",
+      rect: { x: 0.18, y: 0.18, width: 0.64, height: 0.56 },
+      points: [
+        { x: 0.18, y: 0.18 },
+        { x: 0.82, y: 0.18 },
+        { x: 0.82, y: 0.78 },
+        { x: 0.18, y: 0.78 }
+      ]
+    };
+
+    brokerInput.value = params.get("broker") || localStorage.getItem(STORE_KEYS.broker) || brokerInput.value;
+    portInput.value = params.get("port") || localStorage.getItem(STORE_KEYS.port) || portInput.value;
+    topicInput.value = params.get("topic") || localStorage.getItem(STORE_KEYS.topic) || topicInput.value;
+    stageWidthInput.value = localStorage.getItem(STORE_KEYS.stageWidth) || stageWidthInput.value;
+    stageHeightInput.value = localStorage.getItem(STORE_KEYS.stageHeight) || stageHeightInput.value;
+    objectFitSelect.value = localStorage.getItem(STORE_KEYS.objectFit) || objectFitSelect.value;
+    topicStateText.textContent = topicInput.value.trim();
+
+    function translateClass(name) {
+      return translations[name] || name;
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function setStatus(message, kind = "info") {
+      statusText.textContent = message;
+      statusText.className = kind === "info" ? "status" : `status ${kind}`;
+    }
+
+    function formatTaipeiTime(value) {
+      if (!value) {
+        return "unknown";
+      }
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) {
+        return String(value);
+      }
+      return new Intl.DateTimeFormat("zh-TW", {
+        timeZone: "Asia/Taipei",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false
+      }).format(date).replace(/\//g, "-");
+    }
+
+    function ensureAudioContext() {
+      if (!audioContext) {
+        const Context = window.AudioContext || window.webkitAudioContext;
+        if (!Context) {
+          return null;
+        }
+        audioContext = new Context();
+      }
+      if (audioContext.state === "suspended") {
+        audioContext.resume().catch(() => {});
+      }
+      return audioContext;
+    }
+
+    function playAlertBeep() {
+      if (!soundAlertToggle.checked) {
+        return;
+      }
+      const context = ensureAudioContext();
+      if (!context) {
+        return;
+      }
+      const oscillator = context.createOscillator();
+      const gainNode = context.createGain();
+      oscillator.type = "square";
+      oscillator.frequency.value = 880;
+      gainNode.gain.setValueAtTime(0.0001, context.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.16, context.currentTime + 0.02);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.28);
+      oscillator.connect(gainNode);
+      gainNode.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.3);
+    }
+
+    function setAlarmBeepActive(active) {
+      if (!soundAlertToggle.checked) {
+        active = false;
+      }
+      if (active) {
+        if (alarmBeepTimer) {
+          return;
+        }
+        playAlertBeep();
+        alarmBeepTimer = window.setInterval(playAlertBeep, 1000);
+        return;
+      }
+      if (alarmBeepTimer) {
+        clearInterval(alarmBeepTimer);
+        alarmBeepTimer = undefined;
+      }
+    }
+
+    function persistConfig() {
+      localStorage.setItem(STORE_KEYS.broker, brokerInput.value.trim());
+      localStorage.setItem(STORE_KEYS.port, portInput.value.trim());
+      localStorage.setItem(STORE_KEYS.topic, topicInput.value.trim());
+      localStorage.setItem(STORE_KEYS.stageWidth, stageWidthInput.value);
+      localStorage.setItem(STORE_KEYS.stageHeight, stageHeightInput.value);
+      localStorage.setItem(STORE_KEYS.objectFit, objectFitSelect.value);
+    }
+
+    function getTopic() {
+      return topicInput.value.trim();
+    }
+
+    function getBrokerUrl() {
+      return `wss://${brokerInput.value.trim()}:${portInput.value.trim() || "8084"}/mqtt`;
+    }
+
+    function getDeviceName() {
+      const topic = getTopic();
+      const cameraId = topic.split("/").pop() || "camera";
+      return `${cameraId}-viewer`;
+    }
+
+    function applyStageSize() {
+      const width = clamp(Number(stageWidthInput.value) || 960, 480, 1280);
+      const height = clamp(Number(stageHeightInput.value) || 540, 270, 900);
+      stage.style.setProperty("--stage-width", `${width}px`);
+      stage.style.setProperty("--stage-height", `${height}px`);
+      stageWidthValue.textContent = String(width);
+      stageHeightValue.textContent = String(height);
+      frame.style.objectFit = objectFitSelect.value;
+      persistConfig();
+    }
+
+    function updateSelectedSummary() {
+      if (selectedClasses.size === classNames.length) {
+        selectedSummaryText.textContent = "全部";
+        return;
+      }
+      if (selectedClasses.size === 0) {
+        selectedSummaryText.textContent = "未選擇";
+        return;
+      }
+      selectedSummaryText.textContent = classNames.filter((name) => selectedClasses.has(name)).map(translateClass).join("、");
+    }
+
+    function renderClassPicker() {
+      classPickerList.innerHTML = "";
+      for (const className of classNames) {
+        const label = document.createElement("label");
+        label.className = "class-item";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = selectedClasses.has(className);
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) {
+            selectedClasses.add(className);
+          } else {
+            selectedClasses.delete(className);
+          }
+          updateSelectedSummary();
+          scheduleControlPublish();
+        });
+        const text = document.createElement("span");
+        text.textContent = translateClass(className);
+        label.appendChild(checkbox);
+        label.appendChild(text);
+        classPickerList.appendChild(label);
+      }
+      updateSelectedSummary();
+    }
+
+    function syncFenceControlsFromState(targetFence = localFenceState) {
+      fenceEnabledSelect.value = targetFence.enabled ? "on" : "off";
+      fenceShapeSelect.value = targetFence.shape || "rect";
+      rectFenceControls.classList.toggle("hidden", fenceShapeSelect.value !== "rect");
+      polygonFenceControls.classList.toggle("hidden", fenceShapeSelect.value !== "polygon");
+      rectXInput.value = String(Math.round((targetFence.rect?.x || 0) * 100));
+      rectYInput.value = String(Math.round((targetFence.rect?.y || 0) * 100));
+      rectWidthInput.value = String(Math.round((targetFence.rect?.width || 0.6) * 100));
+      rectHeightInput.value = String(Math.round((targetFence.rect?.height || 0.6) * 100));
+      polygonPointsInput.value = (targetFence.points || []).map((point) => `${Math.round(point.x * 100)},${Math.round(point.y * 100)}`).join("\n");
+      fenceStateText.textContent = `${targetFence.enabled ? "啟用" : "停用"} / ${targetFence.shape === "polygon" ? "多邊形" : "矩形"}`;
+    }
+
+    function parsePolygonPoints() {
+      const lines = polygonPointsInput.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      const points = [];
+      for (const line of lines) {
+        const [rawX, rawY] = line.split(",").map((part) => Number(part.trim()));
+        if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) {
+          continue;
+        }
+        points.push({ x: clamp(rawX / 100, 0, 1), y: clamp(rawY / 100, 0, 1) });
+      }
+      return points;
+    }
+
+    function readFenceStateFromControls() {
+      localFenceState.enabled = fenceEnabledSelect.value === "on";
+      localFenceState.shape = fenceShapeSelect.value === "polygon" ? "polygon" : "rect";
+      localFenceState.rect = {
+        x: clamp((Number(rectXInput.value) || 0) / 100, 0, 0.95),
+        y: clamp((Number(rectYInput.value) || 0) / 100, 0, 0.95),
+        width: clamp((Number(rectWidthInput.value) || 5) / 100, 0.05, 1),
+        height: clamp((Number(rectHeightInput.value) || 5) / 100, 0.05, 1)
+      };
+      localFenceState.points = parsePolygonPoints();
+      syncFenceControlsFromState(localFenceState);
+      redrawOverlay();
+    }
+
+    function serializeFence(fence) {
+      return {
+        enabled: fence.enabled,
+        shape: fence.shape,
+        rect: { ...fence.rect },
+        points: fence.points.map((point) => ({ ...point }))
+      };
+    }
+
+    function normalizeFenceState(rawFence) {
+      if (!rawFence) {
+        return serializeFence(localFenceState);
+      }
+      return {
+        enabled: rawFence.enabled !== false,
+        shape: rawFence.shape === "polygon" ? "polygon" : "rect",
+        rect: {
+          x: clamp(rawFence.rect?.x ?? localFenceState.rect.x, 0, 1),
+          y: clamp(rawFence.rect?.y ?? localFenceState.rect.y, 0, 1),
+          width: clamp(rawFence.rect?.width ?? localFenceState.rect.width, 0.05, 1),
+          height: clamp(rawFence.rect?.height ?? localFenceState.rect.height, 0.05, 1)
+        },
+        points: Array.isArray(rawFence.points) && rawFence.points.length >= 3
+          ? rawFence.points.map((point) => ({ x: clamp(point.x ?? 0, 0, 1), y: clamp(point.y ?? 0, 0, 1) }))
+          : serializeFence(localFenceState).points
+      };
+    }
+
+    function pointInPolygon(point, points) {
+      let inside = false;
+      for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+        const xi = points[i].x;
+        const yi = points[i].y;
+        const xj = points[j].x;
+        const yj = points[j].y;
+        const intersect = ((yi > point.y) !== (yj > point.y)) &&
+          (point.x < ((xj - xi) * (point.y - yi)) / ((yj - yi) || 0.000001) + xi);
+        if (intersect) {
+          inside = !inside;
+        }
+      }
+      return inside;
+    }
+
+    function isPointInsideFence(point, fence) {
+      if (!fence || !fence.enabled) {
+        return false;
+      }
+      if (fence.shape === "polygon" && Array.isArray(fence.points) && fence.points.length >= 3) {
+        return pointInPolygon(point, fence.points);
+      }
+      const rect = fence.rect || localFenceState.rect;
+      return point.x >= rect.x && point.x <= rect.x + rect.width &&
+        point.y >= rect.y && point.y <= rect.y + rect.height;
+    }
+
+    function resizeOverlay(width, height) {
+      const targetWidth = width || frame.naturalWidth || 640;
+      const targetHeight = height || frame.naturalHeight || 360;
+      if (!targetWidth || !targetHeight) {
+        return;
+      }
+      if (overlay.width !== targetWidth || overlay.height !== targetHeight) {
+        overlay.width = targetWidth;
+        overlay.height = targetHeight;
+      }
+    }
+
+    function clearOverlay() {
+      overlayContext.clearRect(0, 0, overlay.width, overlay.height);
+    }
+
+    function drawFence(width, height, fence) {
+      if (!fence || !fence.enabled) {
+        return;
+      }
+      overlayContext.save();
+      overlayContext.strokeStyle = "#facc15";
+      overlayContext.fillStyle = "rgba(250, 204, 21, 0.08)";
+      overlayContext.lineWidth = 3;
+      if (fence.shape === "polygon" && Array.isArray(fence.points) && fence.points.length >= 3) {
+        overlayContext.beginPath();
+        fence.points.forEach((point, index) => {
+          const px = point.x * width;
+          const py = point.y * height;
+          if (index === 0) {
+            overlayContext.moveTo(px, py);
+          } else {
+            overlayContext.lineTo(px, py);
+          }
+        });
+        overlayContext.closePath();
+        overlayContext.fill();
+        overlayContext.stroke();
+      } else {
+        const rect = fence.rect || localFenceState.rect;
+        const x = rect.x * width;
+        const y = rect.y * height;
+        const rectWidth = rect.width * width;
+        const rectHeight = rect.height * height;
+        overlayContext.fillRect(x, y, rectWidth, rectHeight);
+        overlayContext.strokeRect(x, y, rectWidth, rectHeight);
+      }
+      overlayContext.fillStyle = "#facc15";
+      overlayContext.font = "bold 16px Microsoft JhengHei";
+      overlayContext.fillText("電子圍籬", 12, 24);
+      if (editFenceToggle.checked && fence === localFenceState) {
+        const handlePoints = fence.shape === "polygon" && fence.points.length >= 3
+          ? fence.points
+          : [
+              { x: fence.rect.x, y: fence.rect.y },
+              { x: fence.rect.x + fence.rect.width, y: fence.rect.y },
+              { x: fence.rect.x + fence.rect.width, y: fence.rect.y + fence.rect.height },
+              { x: fence.rect.x, y: fence.rect.y + fence.rect.height }
+            ];
+        overlayContext.fillStyle = "#fde68a";
+        for (const point of handlePoints) {
+          overlayContext.beginPath();
+          overlayContext.arc(point.x * width, point.y * height, 7, 0, Math.PI * 2);
+          overlayContext.fill();
+        }
+      }
+      overlayContext.restore();
+    }
+
+    function drawItems(items, width, height, fence) {
+      resizeOverlay(width, height);
+      clearOverlay();
+      drawFence(overlay.width, overlay.height, fence);
+      overlayContext.lineWidth = 2;
+      overlayContext.font = "16px Microsoft JhengHei";
+      for (const item of items) {
+        const [nx, ny, nWidth, nHeight] = item.bbox;
+        const x = nx * overlay.width;
+        const y = ny * overlay.height;
+        const boxWidth = nWidth * overlay.width;
+        const boxHeight = nHeight * overlay.height;
+        const centerX = (item.center?.x ?? (nx + nWidth / 2)) * overlay.width;
+        const centerY = (item.center?.y ?? (ny + nHeight / 2)) * overlay.height;
+        const score = Math.round((item.score || 0) * 100);
+        const label = `${item.label || translateClass(item.class)} ${score}%`;
+        const color = item.insideFence ? "#ef4444" : "#22c55e";
+        const textWidth = overlayContext.measureText(label).width;
+        const textHeight = 24;
+        const boxX = clamp(x, 0, Math.max(0, overlay.width - boxWidth));
+        const boxY = clamp(y, 0, Math.max(0, overlay.height - boxHeight));
+        const textX = clamp(boxX, 0, Math.max(0, overlay.width - textWidth - 12));
+        const textY = clamp(boxY - textHeight - 4, 0, Math.max(0, overlay.height - textHeight));
+        overlayContext.strokeStyle = color;
+        overlayContext.fillStyle = color;
+        overlayContext.strokeRect(boxX, boxY, boxWidth, boxHeight);
+        overlayContext.fillRect(textX, textY, textWidth + 12, textHeight);
+        overlayContext.fillStyle = "#020617";
+        overlayContext.fillText(label, textX + 6, textY + 17);
+        overlayContext.beginPath();
+        overlayContext.fillStyle = color;
+        overlayContext.arc(centerX, centerY, 5, 0, Math.PI * 2);
+        overlayContext.fill();
+      }
+    }
+
+    function redrawOverlay() {
+      if (!latestItems.length) {
+        clearOverlay();
+        drawFence(overlay.width || 640, overlay.height || 360, localFenceState);
+        return;
+      }
+      drawItems(
+        latestItems,
+        latestImageSize.width || frame.naturalWidth,
+        latestImageSize.height || frame.naturalHeight,
+        localFenceState
+      );
+    }
+
+    function setDetections(items) {
+      detectionsList.innerHTML = "";
+      if (!items.length) {
+        const item = document.createElement("li");
+        item.textContent = "尚未收到辨識資料。";
+        detectionsList.appendChild(item);
+        insideCountStateText.textContent = "0";
+        return;
+      }
+      const insideCount = items.filter((item) => item.insideFence).length;
+      insideCountStateText.textContent = String(insideCount);
+      for (const detection of items) {
+        const item = document.createElement("li");
+        const score = Math.round((detection.score || 0) * 100);
+        item.textContent = `${detection.label || translateClass(detection.class)}（${score}%）${detection.insideFence ? "｜圍籬內" : "｜圍籬外"}`;
+        item.style.color = detection.insideFence ? "#fca5a5" : "#e2e8f0";
+        detectionsList.appendChild(item);
+      }
+    }
+
+    function normalizePayload(payload) {
+      if (!payload) {
+        return null;
+      }
+      if (typeof payload === "string") {
+        return {
+          type: "frame",
+          ts: new Date().toISOString(),
+          deviceName: "external",
+          image: { mime: "image/jpeg", width: 0, height: 0, base64: payload },
+          detect: { model: "external", selectedClasses: [], items: [] },
+          fence: { ...serializeFence(localFenceState), insideCount: 0, enabled: false },
+          alerts: { mqttEnabled: true },
+          controlState: { revision: 0, pendingRevision: 0 },
+          status: { isActive: true, message: "已收到遠端影像。" }
+        };
+      }
+      return payload;
+    }
+
+    function normalizeItems(items, imageWidth, imageHeight, fence) {
+      return (items || []).map((item) => {
+        const bbox = Array.isArray(item.bbox) ? item.bbox.slice(0, 4) : [0, 0, 0, 0];
+        const normalizedBox = Math.max(...bbox.map((value) => Math.abs(value))) <= 1.05
+          ? bbox
+          : [bbox[0] / (imageWidth || 1), bbox[1] / (imageHeight || 1), bbox[2] / (imageWidth || 1), bbox[3] / (imageHeight || 1)];
+        const center = item.center && Number.isFinite(item.center.x) && Number.isFinite(item.center.y)
+          ? {
+              x: item.center.x > 1 ? item.center.x / (imageWidth || 1) : item.center.x,
+              y: item.center.y > 1 ? item.center.y / (imageHeight || 1) : item.center.y
+            }
+          : { x: normalizedBox[0] + normalizedBox[2] / 2, y: normalizedBox[1] + normalizedBox[3] / 2 };
+        return {
+          class: item.class || "unknown",
+          label: item.label || translateClass(item.class),
+          score: item.score || 0,
+          bbox: normalizedBox,
+          center,
+          insideFence: typeof item.insideFence === "boolean" ? item.insideFence : isPointInsideFence(center, fence)
+        };
+      });
+    }
+
+    function buildControlPayload() {
+      const revision = ++localControlRevisionCounter;
+      pendingControlRevision = revision;
+      return {
+        type: "control",
+        ts: new Date().toISOString(),
+        source: getDeviceName(),
+        revision,
+        control: {
+          selectedClasses: classNames.filter((name) => selectedClasses.has(name)),
+          fence: serializeFence(localFenceState),
+          mqttAlertEnabled: mqttAlertToggle.checked,
+          lineAlertEnabled: lineAlertToggle.checked,
+          lineClearEnabled: lineClearToggle.checked
+        }
+      };
+    }
+
+    function publishControlState(statusMessage) {
+      if (!mqttClient || !mqttClient.connected) {
+        return;
+      }
+      try {
+        mqttClient.publish(getTopic(), JSON.stringify(buildControlPayload()), { qos: 1, retain: false });
+        if (statusMessage) {
+          setStatus(statusMessage, "success");
+        }
+      } catch {
+        setStatus("控制設定送出失敗。", "error");
+      }
+    }
+
+    function scheduleControlPublish() {
+      if (controlPublishTimer) {
+        clearTimeout(controlPublishTimer);
+      }
+      controlPublishTimer = window.setTimeout(() => {
+        publishControlState("遠端控制設定已更新。");
+      }, 120);
+    }
+
+    function updateAlarmState(isInside, message) {
+      setAlarmBeepActive(isInside);
+      alarmActive = isInside;
+      if (message) {
+        alarmMessageStateText.textContent = message;
+        if (isInside) {
+          setStatus(message, "warning");
+        }
+      }
+    }
+
+    function applyFramePayload(payload) {
+      const image = payload.image || {};
+      const incomingFence = normalizeFenceState(payload.fence || localFenceState);
+      latestFence = incomingFence;
+      const incomingRevision = Number(payload.controlState?.revision || 0);
+      if (incomingRevision > lastAppliedControlRevision) {
+        lastAppliedControlRevision = incomingRevision;
+      }
+      const canApplyRemoteControl = !pendingControlRevision || incomingRevision >= pendingControlRevision;
+      const displayFence = canApplyRemoteControl ? incomingFence : localFenceState;
+      if (canApplyRemoteControl) {
+        if (payload.alerts && typeof payload.alerts.mqttEnabled === "boolean") {
+          mqttAlertToggle.checked = payload.alerts.mqttEnabled;
+        }
+        if (payload.alerts && typeof payload.alerts.lineEnabled === "boolean") {
+          lineAlertToggle.checked = payload.alerts.lineEnabled;
+        }
+        if (payload.alerts && typeof payload.alerts.lineClearEnabled === "boolean") {
+          lineClearToggle.checked = payload.alerts.lineClearEnabled;
+        }
+        if (pendingControlRevision && incomingRevision >= pendingControlRevision) {
+          pendingControlRevision = 0;
+        }
+        localFenceState.enabled = incomingFence.enabled;
+        localFenceState.shape = incomingFence.shape;
+        localFenceState.rect = { ...incomingFence.rect };
+        localFenceState.points = incomingFence.points.map((point) => ({ ...point }));
+        if (Array.isArray(payload.detect?.selectedClasses)) {
+          selectedClasses = new Set(payload.detect.selectedClasses.filter((name) => classNames.includes(name)));
+        }
+        renderClassPicker();
+        syncFenceControlsFromState(localFenceState);
+      }
+
+      const items = normalizeItems(payload.detect?.items || [], image.width, image.height, displayFence);
+      latestItems = items;
+      latestImageSize = { width: image.width || 0, height: image.height || 0 };
+
+      updatedAtText.textContent = formatTaipeiTime(payload.ts);
+      modelStateText.textContent = payload.detect?.model || "unknown";
+      deviceStateText.textContent = payload.deviceName || "unknown";
+      topicStateText.textContent = getTopic();
+      setDetections(items);
+      updateAlarmState((payload.fence?.insideCount ?? items.filter((item) => item.insideFence).length) > 0, "");
+
+      const active = !(payload.status) || payload.status.isActive !== false;
+      const message = payload.status?.message || "已收到遠端影像。";
+      setStatus(message, active ? "success" : "warning");
+
+      if (!active || !image.base64) {
+        frame.removeAttribute("src");
+        clearOverlay();
+        drawFence(image.width || 640, image.height || 360, displayFence);
+        return;
+      }
+      frame.src = `data:${image.mime || "image/jpeg"};base64,${image.base64}`;
+    }
+
+    function handleAlarmPayload(payload) {
+      const alarm = payload.alarm || {};
+      const active = alarm.active !== false && Number(alarm.insideCount || 0) > 0;
+      updateAlarmState(active, alarm.message || (active ? "電子圍籬內有目標。" : "電子圍籬警報已解除。"));
+      if (typeof alarm.insideCount === "number") {
+        insideCountStateText.textContent = String(alarm.insideCount);
+      }
+      if (!active && !alarm.message) {
+        alarmMessageStateText.textContent = "電子圍籬警報已解除。";
+      }
+    }
+
+    function applyControlPayload(payload) {
+      if (payload.source === getDeviceName()) {
+        return;
+      }
+      if (typeof payload.revision === "number") {
+        lastAppliedControlRevision = payload.revision;
+        if (payload.revision >= pendingControlRevision) {
+          pendingControlRevision = 0;
+        }
+      }
+      const control = payload.control || {};
+      if (Array.isArray(control.selectedClasses)) {
+        selectedClasses = new Set(control.selectedClasses.filter((name) => classNames.includes(name)));
+        renderClassPicker();
+      }
+      if (control.fence) {
+        const nextFence = normalizeFenceState(control.fence);
+        localFenceState.enabled = nextFence.enabled;
+        localFenceState.shape = nextFence.shape;
+        localFenceState.rect = { ...nextFence.rect };
+        localFenceState.points = nextFence.points.map((point) => ({ ...point }));
+        syncFenceControlsFromState(localFenceState);
+        redrawOverlay();
+      }
+      if (typeof control.mqttAlertEnabled === "boolean") {
+        mqttAlertToggle.checked = control.mqttAlertEnabled;
+      }
+      if (typeof control.lineAlertEnabled === "boolean") {
+        lineAlertToggle.checked = control.lineAlertEnabled;
+      }
+      if (typeof control.lineClearEnabled === "boolean") {
+        lineClearToggle.checked = control.lineClearEnabled;
+      }
+    }
+
+    function connectMqtt() {
+      const topic = getTopic();
+      const broker = brokerInput.value.trim();
+      if (!broker || !topic) {
+        setStatus("請先輸入 Broker 與 Topic。", "error");
+        return;
+      }
+      persistConfig();
+      if (mqttClient) {
+        mqttClient.end(true);
+      }
+      mqttManualDisconnect = false;
+      mqttStateText.textContent = "連線中";
+      topicStateText.textContent = topic;
+      setStatus("正在連線到 MQTT broker...", "info");
+      mqttClient = mqtt.connect(getBrokerUrl(), {
+        clean: true,
+        keepalive: 30,
+        connectTimeout: 10000,
+        reconnectPeriod: 3000
+      });
+
+      mqttClient.on("connect", () => {
+        mqttStateText.textContent = "已連線";
+        connectButton.disabled = true;
+        disconnectButton.disabled = false;
+        brokerInput.disabled = true;
+        portInput.disabled = true;
+        topicInput.disabled = true;
+        lastMessageAt = Date.now();
+        setStatus(`MQTT 已連線：${topic}`, "success");
+        mqttClient.subscribe(topic, { qos: 1 }, (error) => {
+          if (error) {
+            mqttStateText.textContent = "訂閱失敗";
+            setStatus("MQTT Topic 訂閱失敗。", "error");
+          } else {
+            mqttStateText.textContent = "已訂閱";
+          }
+        });
+      });
+
+      mqttClient.on("message", (_topic, message) => {
+        let parsed;
+        try {
+          parsed = JSON.parse(message.toString());
+        } catch {
+          parsed = message.toString();
+        }
+        const payload = normalizePayload(parsed);
+        if (!payload) {
+          return;
+        }
+        if (payload.type === "control") {
+          applyControlPayload(payload);
+          return;
+        }
+        if (payload.type === "alarm") {
+          handleAlarmPayload(payload);
+          return;
+        }
+        lastMessageAt = Date.now();
+        if (payload.ts && payload.ts === latestTimestamp) {
+          return;
+        }
+        latestTimestamp = payload.ts || "";
+        applyFramePayload(payload);
+      });
+
+      mqttClient.on("reconnect", () => {
+        mqttStateText.textContent = "重新連線中";
+        setStatus("MQTT 斷線，正在自動重連...", "warning");
+      });
+
+      mqttClient.on("close", () => {
+        mqttStateText.textContent = "未連線";
+        connectButton.disabled = false;
+        disconnectButton.disabled = true;
+        brokerInput.disabled = false;
+        portInput.disabled = false;
+        topicInput.disabled = false;
+        if (!mqttManualDisconnect) {
+          setStatus("MQTT 連線中斷，等待自動重連...", "warning");
+        }
+      });
+
+      mqttClient.on("error", (error) => {
+        mqttStateText.textContent = "錯誤";
+        const reason = error && error.message ? error.message : "unknown";
+        setStatus(`MQTT 錯誤：${reason}`, "error");
+      });
+    }
+
+    function disconnectMqtt() {
+      mqttManualDisconnect = true;
+      if (mqttClient) {
+        mqttClient.end(true);
+        mqttClient = undefined;
+      }
+      mqttStateText.textContent = "未連線";
+      connectButton.disabled = false;
+      disconnectButton.disabled = true;
+      brokerInput.disabled = false;
+      portInput.disabled = false;
+      topicInput.disabled = false;
+      setStatus("MQTT 已手動中斷。");
+    }
+
+    function startWatchdog() {
+      if (watchdogTimer) {
+        clearInterval(watchdogTimer);
+      }
+      watchdogTimer = window.setInterval(() => {
+        if (mqttManualDisconnect) {
+          return;
+        }
+        if (!mqttClient || !mqttClient.connected) {
+          return;
+        }
+        if (!lastMessageAt) {
+          return;
+        }
+        if (Date.now() - lastMessageAt < MESSAGE_TIMEOUT_MS) {
+          return;
+        }
+        setStatus("長時間沒有收到新畫面，正在重新連線 MQTT...", "warning");
+        lastMessageAt = Date.now();
+        mqttClient.end(true);
+      }, 5000);
+    }
+
+    function updateOverlayEditMode() {
+      overlay.style.pointerEvents = editFenceToggle.checked ? "auto" : "none";
+      overlay.style.cursor = editFenceToggle.checked ? "crosshair" : "default";
+    }
+
+    function getNormalizedPointer(event) {
+      const rect = overlay.getBoundingClientRect();
+      return {
+        x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
+        y: clamp((event.clientY - rect.top) / rect.height, 0, 1)
+      };
+    }
+
+    function pickFenceHandle(point) {
+      const threshold = 18 / Math.max(overlay.width || 640, overlay.height || 360);
+      if (localFenceState.shape === "polygon" && localFenceState.points.length >= 3) {
+        for (let index = 0; index < localFenceState.points.length; index += 1) {
+          const candidate = localFenceState.points[index];
+          if (Math.hypot(point.x - candidate.x, point.y - candidate.y) <= threshold) {
+            return { type: "polygon-point", index };
+          }
+        }
+        return null;
+      }
+      const rect = localFenceState.rect;
+      const corners = {
+        tl: { x: rect.x, y: rect.y },
+        tr: { x: rect.x + rect.width, y: rect.y },
+        br: { x: rect.x + rect.width, y: rect.y + rect.height },
+        bl: { x: rect.x, y: rect.y + rect.height }
+      };
+      for (const [corner, cornerPoint] of Object.entries(corners)) {
+        if (Math.hypot(point.x - cornerPoint.x, point.y - cornerPoint.y) <= threshold) {
+          return { type: "rect-corner", corner };
+        }
+      }
+      if (point.x >= rect.x && point.x <= rect.x + rect.width && point.y >= rect.y && point.y <= rect.y + rect.height) {
+        return { type: "rect-body", offsetX: point.x - rect.x, offsetY: point.y - rect.y };
+      }
+      return null;
+    }
+
+    function applyDragPoint(point) {
+      if (!dragState) {
+        return;
+      }
+      if (dragState.type === "polygon-point") {
+        localFenceState.points[dragState.index] = { x: clamp(point.x, 0, 1), y: clamp(point.y, 0, 1) };
+        syncFenceControlsFromState(localFenceState);
+        redrawOverlay();
+        scheduleControlPublish();
+        return;
+      }
+      const minSize = 0.05;
+      if (dragState.type === "rect-body") {
+        localFenceState.rect.x = clamp(point.x - dragState.offsetX, 0, 1 - localFenceState.rect.width);
+        localFenceState.rect.y = clamp(point.y - dragState.offsetY, 0, 1 - localFenceState.rect.height);
+      } else if (dragState.type === "rect-corner") {
+        const rect = localFenceState.rect;
+        const right = rect.x + rect.width;
+        const bottom = rect.y + rect.height;
+        let left = rect.x;
+        let top = rect.y;
+        let nextRight = right;
+        let nextBottom = bottom;
+        if (dragState.corner.includes("l")) {
+          left = clamp(point.x, 0, right - minSize);
+        }
+        if (dragState.corner.includes("r")) {
+          nextRight = clamp(point.x, left + minSize, 1);
+        }
+        if (dragState.corner.includes("t")) {
+          top = clamp(point.y, 0, bottom - minSize);
+        }
+        if (dragState.corner.includes("b")) {
+          nextBottom = clamp(point.y, top + minSize, 1);
+        }
+        localFenceState.rect.x = left;
+        localFenceState.rect.y = top;
+        localFenceState.rect.width = nextRight - left;
+        localFenceState.rect.height = nextBottom - top;
+      }
+      syncFenceControlsFromState(localFenceState);
+      redrawOverlay();
+      scheduleControlPublish();
+    }
+
+    selectAllButton.addEventListener("click", () => {
+      selectedClasses = new Set(classNames);
+      renderClassPicker();
+      scheduleControlPublish();
+    });
+
+    clearAllButton.addEventListener("click", () => {
+      selectedClasses = new Set();
+      renderClassPicker();
+      scheduleControlPublish();
+    });
+
+    [stageWidthInput, stageHeightInput].forEach((input) => {
+      input.addEventListener("input", applyStageSize);
+      input.addEventListener("change", applyStageSize);
+    });
+    objectFitSelect.addEventListener("change", applyStageSize);
+
+    [fenceEnabledSelect, fenceShapeSelect, rectXInput, rectYInput, rectWidthInput, rectHeightInput].forEach((input) => {
+      input.addEventListener("change", () => {
+        rectFenceControls.classList.toggle("hidden", fenceShapeSelect.value !== "rect");
+        polygonFenceControls.classList.toggle("hidden", fenceShapeSelect.value !== "polygon");
+        readFenceStateFromControls();
+        scheduleControlPublish();
+      });
+    });
+    polygonPointsInput.addEventListener("change", () => {
+      readFenceStateFromControls();
+      scheduleControlPublish();
+    });
+    applyPolygonButton.addEventListener("click", () => {
+      readFenceStateFromControls();
+      scheduleControlPublish();
+    });
+    presetRectButton.addEventListener("click", () => {
+      localFenceState.enabled = true;
+      localFenceState.shape = "rect";
+      localFenceState.rect = { x: 0.18, y: 0.18, width: 0.64, height: 0.56 };
+      syncFenceControlsFromState(localFenceState);
+      redrawOverlay();
+      scheduleControlPublish();
+    });
+    presetPolygonButton.addEventListener("click", () => {
+      localFenceState.enabled = true;
+      localFenceState.shape = "polygon";
+      localFenceState.points = [
+        { x: 0.12, y: 0.22 },
+        { x: 0.5, y: 0.12 },
+        { x: 0.86, y: 0.24 },
+        { x: 0.78, y: 0.8 },
+        { x: 0.24, y: 0.86 }
+      ];
+      syncFenceControlsFromState(localFenceState);
+      redrawOverlay();
+      scheduleControlPublish();
+    });
+
+    editFenceToggle.addEventListener("change", updateOverlayEditMode);
+    soundAlertToggle.addEventListener("change", () => {
+      if (soundAlertToggle.checked) {
+        ensureAudioContext();
+        if (alarmActive) {
+          setAlarmBeepActive(true);
+        }
+      } else {
+        setAlarmBeepActive(false);
+      }
+    });
+    [mqttAlertToggle, lineAlertToggle, lineClearToggle].forEach((input) => {
+      input.addEventListener("change", scheduleControlPublish);
+    });
+    connectButton.addEventListener("click", connectMqtt);
+    disconnectButton.addEventListener("click", disconnectMqtt);
+
+    overlay.addEventListener("pointerdown", (event) => {
+      if (!editFenceToggle.checked) {
+        return;
+      }
+      const handle = pickFenceHandle(getNormalizedPointer(event));
+      if (!handle) {
+        return;
+      }
+      dragState = handle.type === "rect-body" ? { ...handle } : handle;
+      overlay.setPointerCapture(event.pointerId);
+    });
+    overlay.addEventListener("pointermove", (event) => {
+      if (!dragState) {
+        return;
+      }
+      applyDragPoint(getNormalizedPointer(event));
+    });
+    overlay.addEventListener("pointerup", () => { dragState = null; });
+    overlay.addEventListener("pointercancel", () => { dragState = null; });
+
+    frame.addEventListener("load", () => {
+      drawItems(
+        latestItems,
+        latestImageSize.width || frame.naturalWidth,
+        latestImageSize.height || frame.naturalHeight,
+        localFenceState
+      );
+    });
+
+    window.addEventListener("beforeunload", () => {
+      if (mqttClient) {
+        mqttClient.end(true);
+      }
+    });
+
+    renderClassPicker();
+    syncFenceControlsFromState(localFenceState);
+    applyStageSize();
+    updateOverlayEditMode();
+    connectMqtt();
+    startWatchdog();
+  </script>
+</body>
+</html>
