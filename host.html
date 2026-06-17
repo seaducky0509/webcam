@@ -365,6 +365,12 @@
             <option value="contain">完整顯示</option>
           </select>
         </div>
+        <div class="field">
+          <label for="cameraSelect">攝影機</label>
+          <select id="cameraSelect">
+            <option value="">自動選擇實體攝影機</option>
+          </select>
+        </div>
         <div class="actions" id="hostActions">
           <button id="startButton" type="button" disabled>啟動 webcam</button>
           <button id="stopButton" type="button" class="secondary" disabled>停止</button>
@@ -577,6 +583,7 @@
     const stageWidthValue = document.getElementById("stageWidthValue");
     const stageHeightValue = document.getElementById("stageHeightValue");
     const objectFitSelect = document.getElementById("objectFitSelect");
+    const cameraSelect = document.getElementById("cameraSelect");
     const startButton = document.getElementById("startButton");
     const stopButton = document.getElementById("stopButton");
     const selectAllButton = document.getElementById("selectAllButton");
@@ -666,6 +673,7 @@
     let lineNotifyQueue = [];
 
     const LINE_CONFIG_STORAGE_KEY = "mqtt-vision-line-config-v1";
+    const CAMERA_STORAGE_KEY = "mqtt-vision-camera-device-v1";
     const LINE_NOTIFY_MAX_RETRIES = 4;
 
     const compositeCanvas = document.createElement("canvas");
@@ -770,7 +778,11 @@
         labels,
         message,
         screenshot: screenshotBase64
-          ? { mime: "image/jpeg", base64: screenshotBase64 }
+          ? {
+              mime: "image/jpeg",
+              base64: screenshotBase64,
+              kb: Math.max(1, Math.round((screenshotBase64.length * 3 / 4) / 1024))
+            }
           : null
       };
     }
@@ -1081,12 +1093,102 @@
       stage.style.setProperty("--stage-height", `${height}px`);
       stageWidthValue.textContent = String(width);
       stageHeightValue.textContent = String(height);
+      if (mode === "host" && (!video.videoWidth || !video.videoHeight)) {
+        clearOverlay();
+      }
     }
 
     function applyObjectFit() {
       const fit = objectFitSelect.value;
       video.style.objectFit = fit;
       remoteFrame.style.objectFit = fit;
+    }
+
+    function isVirtualCameraLabel(label) {
+      return /imaging\s*edge|sony\s*camera|virtual/i.test(label || "");
+    }
+
+    function getStoredCameraDeviceId() {
+      try {
+        return localStorage.getItem(CAMERA_STORAGE_KEY) || "";
+      } catch {
+        return "";
+      }
+    }
+
+    function storeCameraDeviceId(deviceId) {
+      try {
+        localStorage.setItem(CAMERA_STORAGE_KEY, deviceId || "");
+      } catch {
+        // Ignore storage errors; the current selection still works for this session.
+      }
+    }
+
+    async function getVideoInputDevices() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+        return [];
+      }
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.filter((device) => device.kind === "videoinput");
+    }
+
+    async function populateCameraOptions() {
+      if (mode !== "host" || !cameraSelect) {
+        return [];
+      }
+      let videoInputs = [];
+      try {
+        videoInputs = await getVideoInputDevices();
+      } catch {
+        videoInputs = [];
+      }
+
+      const previousValue = cameraSelect.value || getStoredCameraDeviceId();
+      cameraSelect.innerHTML = "";
+      const autoOption = document.createElement("option");
+      autoOption.value = "";
+      autoOption.textContent = "自動選擇實體攝影機";
+      cameraSelect.appendChild(autoOption);
+
+      videoInputs.forEach((device, index) => {
+        const option = document.createElement("option");
+        option.value = device.deviceId;
+        const label = device.label || `攝影機 ${index + 1}`;
+        option.textContent = isVirtualCameraLabel(label) ? `${label}（虛擬，避免使用）` : label;
+        cameraSelect.appendChild(option);
+      });
+
+      const hasStoredDevice = videoInputs.some((device) => device.deviceId === previousValue);
+      cameraSelect.value = hasStoredDevice ? previousValue : "";
+      if (!hasStoredDevice && previousValue) {
+        storeCameraDeviceId("");
+      }
+      return videoInputs;
+    }
+
+    async function buildVideoConstraints() {
+      let selectedDeviceId = cameraSelect?.value || getStoredCameraDeviceId();
+      let videoInputs = [];
+      try {
+        videoInputs = await getVideoInputDevices();
+      } catch {
+        videoInputs = [];
+      }
+
+      if (!selectedDeviceId) {
+        const physicalCamera = videoInputs.find((device) => !isVirtualCameraLabel(device.label));
+        selectedDeviceId = physicalCamera?.deviceId || "";
+      }
+
+      if (selectedDeviceId) {
+        const selected = videoInputs.find((device) => device.deviceId === selectedDeviceId);
+        if (selected && isVirtualCameraLabel(selected.label)) {
+          setStatus("目前選到虛擬攝影機，請改選實體攝影機。", "warning");
+        }
+        return { deviceId: { exact: selectedDeviceId } };
+      }
+
+      return { facingMode: { ideal: "environment" } };
     }
 
     function syncFenceControlsFromState(targetFence = localFenceState) {
@@ -1261,7 +1363,7 @@
     }
 
     function drawFence(width, height, fence) {
-      if (!fence || !fence.enabled) {
+      if (!fence || !fence.enabled || !width || !height) {
         return;
       }
 
@@ -1318,6 +1420,10 @@
     }
 
     function drawItems(items, sourceWidth, sourceHeight, fence) {
+      if (!sourceWidth || !sourceHeight) {
+        clearOverlay();
+        return;
+      }
       resizeOverlay(sourceWidth, sourceHeight);
       clearOverlay();
       drawFence(overlay.width, overlay.height, fence);
@@ -1455,8 +1561,12 @@
 
     function redrawCurrentOverlay() {
       if (mode === "host") {
-        const width = video.videoWidth || overlay.width || 640;
-        const height = video.videoHeight || overlay.height || 360;
+        if (!video.videoWidth || !video.videoHeight) {
+          clearOverlay();
+          return;
+        }
+        const width = video.videoWidth;
+        const height = video.videoHeight;
         drawItems(latestHostItems, width, height, localFenceState);
         return;
       }
@@ -2210,6 +2320,7 @@
         const devices = await navigator.mediaDevices.enumerateDevices();
         const videoInputs = devices.filter((device) => device.kind === "videoinput");
         videoInputsText.textContent = String(videoInputs.length);
+        await populateCameraOptions();
       } catch {
         videoInputsText.textContent = "讀取失敗";
       }
@@ -2231,12 +2342,15 @@
 
       try {
         setStatus("正在啟動 webcam...", "info");
+        const videoConstraints = await buildVideoConstraints();
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" } },
+          video: videoConstraints,
           audio: false
         });
         video.srcObject = stream;
         await video.play();
+        resizeOverlay(video.videoWidth, video.videoHeight);
+        clearOverlay();
         detectionRunning = true;
         updateButtons(true);
         setStatus("webcam 已啟動，影像辨識與 MQTT 發送中。", "success");
@@ -2306,6 +2420,22 @@
 
     objectFitSelect.addEventListener("change", () => {
       applyObjectFit();
+      redrawCurrentOverlay();
+    });
+
+    cameraSelect.addEventListener("change", async () => {
+      storeCameraDeviceId(cameraSelect.value);
+      if (detectionRunning) {
+        stopWebcam();
+        await startWebcam();
+      }
+    });
+
+    video.addEventListener("loadedmetadata", () => {
+      if (mode !== "host") {
+        return;
+      }
+      resizeOverlay(video.videoWidth, video.videoHeight);
       redrawCurrentOverlay();
     });
 
@@ -2453,7 +2583,7 @@
     loadModel();
     connectMqtt();
     startViewerWatchdog();
-    drawFence(640, 360, localFenceState);
+    clearOverlay();
   </script>
 </body>
 </html>
