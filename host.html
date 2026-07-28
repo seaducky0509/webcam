@@ -567,6 +567,7 @@
     const RETAINED_FRAME_MAX_AGE_MS = 10000;
     const DEFAULT_TOPIC = "vision/seaducky0509/webcam/live01";
     const LEGACY_TOPIC = "vision/demo/cam01";
+    const WEBCAM_START_TIMEOUT_MS = 8000;
     const params = new URLSearchParams(window.location.search);
     const hostname = window.location.hostname;
 
@@ -1209,10 +1210,28 @@
         if (selected && isVirtualCameraLabel(selected.label)) {
           setStatus("目前選到虛擬攝影機，請改選實體攝影機。", "warning");
         }
-        return { deviceId: { exact: selectedDeviceId } };
+        return { deviceId: { ideal: selectedDeviceId } };
       }
 
       return { facingMode: { ideal: "environment" } };
+    }
+
+    function getUserMediaWithTimeout(constraints, timeoutMs = WEBCAM_START_TIMEOUT_MS) {
+      let timedOut = false;
+      const request = navigator.mediaDevices.getUserMedia(constraints).then((nextStream) => {
+        if (timedOut) {
+          nextStream.getTracks().forEach((track) => track.stop());
+          throw new DOMException("Webcam 啟動逾時，已停止延遲回傳的串流。", "TimeoutError");
+        }
+        return nextStream;
+      });
+      const timeout = new Promise((_, reject) => {
+        window.setTimeout(() => {
+          timedOut = true;
+          reject(new DOMException("Webcam 啟動逾時，請確認攝影機沒有被其他程式占用，或改選其他攝影機後重試。", "TimeoutError"));
+        }, timeoutMs);
+      });
+      return Promise.race([request, timeout]);
     }
 
     function syncFenceControlsFromState(targetFence = localFenceState) {
@@ -2385,6 +2404,9 @@
       if (name === "NotReadableError") {
         return "webcam 可能被其他程式占用。";
       }
+      if (name === "TimeoutError") {
+        return message || "Webcam 啟動逾時，請確認攝影機沒有被其他程式占用。";
+      }
       return `啟動 webcam 失敗：${name}${message ? ` - ${message}` : ""}`;
     }
 
@@ -2436,8 +2458,15 @@
 
       try {
         setStatus("正在啟動 webcam...", "info");
+        updateButtons(false);
+        stopButton.disabled = true;
+        if (stream) {
+          stream.getTracks().forEach((track) => track.stop());
+          stream = undefined;
+          video.srcObject = null;
+        }
         const videoConstraints = await buildVideoConstraints();
-        stream = await navigator.mediaDevices.getUserMedia({
+        stream = await getUserMediaWithTimeout({
           video: videoConstraints,
           audio: false
         });
