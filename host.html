@@ -336,7 +336,7 @@
         </div>
         <div class="field">
           <label for="topicInput">主題 Topic</label>
-          <input id="topicInput" type="text" value="vision/demo/cam01" spellcheck="false">
+          <input id="topicInput" type="text" value="vision/seaducky0509/webcam/live01" spellcheck="false">
         </div>
         <div class="actions">
           <button id="connectMqttButton" type="button">連線 MQTT</button>
@@ -565,6 +565,8 @@
     const STALE_FRAME_WARNING_MS = 5000;
     const FRAME_RECONNECT_MS = 15000;
     const RETAINED_FRAME_MAX_AGE_MS = 10000;
+    const DEFAULT_TOPIC = "vision/seaducky0509/webcam/live01";
+    const LEGACY_TOPIC = "vision/demo/cam01";
     const params = new URLSearchParams(window.location.search);
     const hostname = window.location.hostname;
 
@@ -661,6 +663,7 @@
     let latestViewerImageSize = { width: 0, height: 0 };
     let latestPayloadTimestamp = "";
     let latestViewerFrameId = 0;
+    let acceptedViewerSourceId = "";
     let viewerLastMessageAt = 0;
     let viewerConnectedAt = 0;
     let viewerStaleWarningShown = false;
@@ -682,6 +685,7 @@
 
     const LINE_CONFIG_STORAGE_KEY = "mqtt-vision-line-config-v1";
     const CAMERA_STORAGE_KEY = "mqtt-vision-camera-device-v1";
+    const SOURCE_ID_STORAGE_KEY = "mqtt-vision-host-source-id-v1";
     const LINE_NOTIFY_MAX_RETRIES = 4;
 
     const compositeCanvas = document.createElement("canvas");
@@ -692,6 +696,9 @@
     brokerInput.value = params.get("broker") || brokerInput.value;
     portInput.value = params.get("port") || portInput.value;
     topicInput.value = params.get("topic") || topicInput.value;
+    if (!params.get("topic") && topicInput.value.trim() === LEGACY_TOPIC) {
+      topicInput.value = DEFAULT_TOPIC;
+    }
 
     const localFenceState = {
       enabled: true,
@@ -879,6 +886,15 @@
       const topic = getTopic();
       const cameraId = topic.split("/").pop() || "camera";
       return `${cameraId}-${mode}`;
+    }
+
+    function getSourceId() {
+      let sourceId = localStorage.getItem(SOURCE_ID_STORAGE_KEY);
+      if (!sourceId) {
+        sourceId = `host-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        localStorage.setItem(SOURCE_ID_STORAGE_KEY, sourceId);
+      }
+      return sourceId;
     }
 
     function ensureAudioContext() {
@@ -1700,6 +1716,7 @@
       return {
         type: "frame",
         frameId: ++hostFrameId,
+        sourceId: getSourceId(),
         cameraId: getTopic().split("/").pop() || "camera",
         deviceName: getDeviceName(),
         ts: new Date().toISOString(),
@@ -1743,6 +1760,7 @@
       return {
         type: "frame",
         frameId: ++hostFrameId,
+        sourceId: getSourceId(),
         cameraId: getTopic().split("/").pop() || "camera",
         deviceName: getDeviceName(),
         ts: new Date().toISOString(),
@@ -1976,6 +1994,20 @@
         setStatus("收到 MQTT 訊息，但其中沒有影像資料。", "warning");
         return;
       }
+      if (!payload.frameId) {
+        syncStateText.textContent = "忽略舊版來源";
+        setStatus("收到舊版主機端影像（沒有 frameId），已忽略。請確認主機端已開新版網頁並使用新的 Topic。", "warning");
+        return;
+      }
+      if (payload.sourceId) {
+        if (!acceptedViewerSourceId) {
+          acceptedViewerSourceId = payload.sourceId;
+        } else if (payload.sourceId !== acceptedViewerSourceId) {
+          syncStateText.textContent = "忽略其他來源";
+          setStatus("收到同 Topic 的其他來源影像，已忽略；目前只接受第一個新版主機端來源。", "warning");
+          return;
+        }
+      }
 
       const timestamp = payload.ts || "";
       if (timestamp && timestamp === latestPayloadTimestamp) {
@@ -2067,6 +2099,9 @@
       if (mqttClient) {
         mqttClient.end(true);
       }
+      acceptedViewerSourceId = "";
+      latestViewerFrameId = 0;
+      latestPayloadTimestamp = "";
       mqttManualDisconnect = false;
 
       setStatus("正在連線 MQTT broker...", "info");

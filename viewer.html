@@ -167,7 +167,7 @@
         </div>
         <div class="field">
           <label for="topicInput">主題 Topic</label>
-          <input id="topicInput" type="text" value="vision/demo/cam01" spellcheck="false">
+          <input id="topicInput" type="text" value="vision/seaducky0509/webcam/live01" spellcheck="false">
         </div>
         <div class="actions">
           <button id="connectButton" type="button">連線 MQTT</button>
@@ -293,7 +293,7 @@
           <dt>MQTT</dt>
           <dd id="mqttState">未連線</dd>
           <dt>Topic</dt>
-          <dd id="topicState">vision/demo/cam01</dd>
+          <dd id="topicState">vision/seaducky0509/webcam/live01</dd>
           <dt>最後更新</dt>
           <dd id="updatedAt">waiting</dd>
           <dt>模型</dt>
@@ -344,6 +344,8 @@
     const STALE_FRAME_WARNING_MS = 5000;
     const FRAME_RECONNECT_MS = 15000;
     const RETAINED_FRAME_MAX_AGE_MS = 10000;
+    const DEFAULT_TOPIC = "vision/seaducky0509/webcam/live01";
+    const LEGACY_TOPIC = "vision/demo/cam01";
     const STORE_KEYS = {
       broker: "mqttViewer.broker",
       port: "mqttViewer.port",
@@ -405,6 +407,7 @@
     let latestImageSize = { width: 0, height: 0 };
     let latestTimestamp = "";
     let latestFrameId = 0;
+    let acceptedSourceId = "";
     let selectedClasses = new Set(classNames);
     let mqttManualDisconnect = false;
     let lastMessageAt = 0;
@@ -435,6 +438,10 @@
     brokerInput.value = params.get("broker") || localStorage.getItem(STORE_KEYS.broker) || brokerInput.value;
     portInput.value = params.get("port") || localStorage.getItem(STORE_KEYS.port) || portInput.value;
     topicInput.value = params.get("topic") || localStorage.getItem(STORE_KEYS.topic) || topicInput.value;
+    if (topicInput.value.trim() === LEGACY_TOPIC) {
+      topicInput.value = DEFAULT_TOPIC;
+      localStorage.setItem(STORE_KEYS.topic, DEFAULT_TOPIC);
+    }
     stageWidthInput.value = localStorage.getItem(STORE_KEYS.stageWidth) || stageWidthInput.value;
     stageHeightInput.value = localStorage.getItem(STORE_KEYS.stageHeight) || stageHeightInput.value;
     objectFitSelect.value = localStorage.getItem(STORE_KEYS.objectFit) || objectFitSelect.value;
@@ -941,6 +948,20 @@
 
     function applyFramePayload(payload) {
       const image = payload.image || {};
+      if (!payload.frameId) {
+        mqttStateText.textContent = "忽略舊版來源";
+        setStatus("收到舊版主機端影像（沒有 frameId），已忽略。請確認主機端已開新版網頁並使用新的 Topic。", "warning");
+        return false;
+      }
+      if (payload.sourceId) {
+        if (!acceptedSourceId) {
+          acceptedSourceId = payload.sourceId;
+        } else if (payload.sourceId !== acceptedSourceId) {
+          mqttStateText.textContent = "忽略其他來源";
+          setStatus("收到同 Topic 的其他來源影像，已忽略；目前只接受第一個新版主機端來源。", "warning");
+          return false;
+        }
+      }
       const payloadAge = getPayloadAgeMs(payload);
       if (payloadAge > RETAINED_FRAME_MAX_AGE_MS) {
         updatedAtText.textContent = formatTaipeiTime(payload.ts);
@@ -1066,6 +1087,9 @@
       if (mqttClient) {
         mqttClient.end(true);
       }
+      acceptedSourceId = "";
+      latestFrameId = 0;
+      latestTimestamp = "";
       mqttManualDisconnect = false;
       mqttStateText.textContent = "連線中";
       topicStateText.textContent = topic;
