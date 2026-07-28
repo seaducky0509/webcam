@@ -341,7 +341,9 @@
       "person", "bicycle", "car", "motorcycle", "bus", "truck", "cat", "dog", "chair", "bottle", "cell phone", "laptop"
     ];
     const params = new URLSearchParams(window.location.search);
-    const MESSAGE_TIMEOUT_MS = 20000;
+    const STALE_FRAME_WARNING_MS = 5000;
+    const FRAME_RECONNECT_MS = 15000;
+    const RETAINED_FRAME_MAX_AGE_MS = 10000;
     const STORE_KEYS = {
       broker: "mqttViewer.broker",
       port: "mqttViewer.port",
@@ -402,9 +404,12 @@
     let latestFence = null;
     let latestImageSize = { width: 0, height: 0 };
     let latestTimestamp = "";
+    let latestFrameId = 0;
     let selectedClasses = new Set(classNames);
     let mqttManualDisconnect = false;
     let lastMessageAt = 0;
+    let connectedAt = 0;
+    let staleWarningShown = false;
     let watchdogTimer;
     let controlPublishTimer;
     let dragState = null;
@@ -923,8 +928,27 @@
       }
     }
 
+    function getPayloadAgeMs(payload) {
+      const value = Date.parse(payload.ts || "");
+      return Number.isFinite(value) ? Date.now() - value : 0;
+    }
+
+    function markFrameStale(elapsedMs) {
+      const seconds = Math.max(1, Math.round(elapsedMs / 1000));
+      mqttStateText.textContent = "影像停止";
+      setStatus(`影像已停止 ${seconds} 秒，主機端可能離線或沒有持續發布 MQTT 影像。`, "warning");
+    }
+
     function applyFramePayload(payload) {
       const image = payload.image || {};
+      const payloadAge = getPayloadAgeMs(payload);
+      if (payloadAge > RETAINED_FRAME_MAX_AGE_MS) {
+        updatedAtText.textContent = formatTaipeiTime(payload.ts);
+        topicStateText.textContent = getTopic();
+        mqttStateText.textContent = "等待新影像";
+        setStatus("收到 MQTT 保留的舊影像，已忽略；正在等待主機端發布新的現場畫面。", "warning");
+        return false;
+      }
       const incomingFence = normalizeFenceState(payload.fence || localFenceState);
       latestFence = incomingFence;
       const incomingRevision = Number(payload.controlState?.revision || 0);
@@ -965,6 +989,8 @@
       modelStateText.textContent = payload.detect?.model || "unknown";
       deviceStateText.textContent = payload.deviceName || "unknown";
       topicStateText.textContent = getTopic();
+      mqttStateText.textContent = "即時接收中";
+      staleWarningShown = false;
       setDetections(items);
       updateAlarmState((payload.fence?.insideCount ?? items.filter((item) => item.insideFence).length) > 0, "");
 
@@ -979,6 +1005,7 @@
         return;
       }
       frame.src = `data:${image.mime || "image/jpeg"};base64,${image.base64}`;
+      return true;
     }
 
     function handleAlarmPayload(payload) {
@@ -1057,7 +1084,9 @@
         brokerInput.disabled = true;
         portInput.disabled = true;
         topicInput.disabled = true;
-        lastMessageAt = Date.now();
+        connectedAt = Date.now();
+        lastMessageAt = 0;
+        staleWarningShown = false;
         setStatus(`MQTT 已連線：${topic}`, "success");
         mqttClient.subscribe(topic, { qos: 1 }, (error) => {
           if (error) {
@@ -1088,12 +1117,17 @@
           handleAlarmPayload(payload);
           return;
         }
-        lastMessageAt = Date.now();
         if (payload.ts && payload.ts === latestTimestamp) {
           return;
         }
+        if (payload.frameId && payload.frameId === latestFrameId) {
+          return;
+        }
         latestTimestamp = payload.ts || "";
-        applyFramePayload(payload);
+        latestFrameId = Number(payload.frameId || latestFrameId || 0);
+        if (applyFramePayload(payload) !== false) {
+          lastMessageAt = Date.now();
+        }
       });
 
       mqttClient.on("reconnect", () => {
@@ -1147,13 +1181,24 @@
           return;
         }
         if (!lastMessageAt) {
+          if (connectedAt && Date.now() - connectedAt >= STALE_FRAME_WARNING_MS && !staleWarningShown) {
+            staleWarningShown = true;
+            mqttStateText.textContent = "等待影像";
+            setStatus("MQTT 已連線，但尚未收到新的現場影像；請確認主機端已啟動 webcam 並正在發布。", "warning");
+          }
           return;
         }
-        if (Date.now() - lastMessageAt < MESSAGE_TIMEOUT_MS) {
+        const elapsed = Date.now() - lastMessageAt;
+        if (elapsed >= STALE_FRAME_WARNING_MS && !staleWarningShown) {
+          staleWarningShown = true;
+          markFrameStale(elapsed);
+        }
+        if (elapsed < FRAME_RECONNECT_MS) {
           return;
         }
         setStatus("長時間沒有收到新畫面，正在重新連線 MQTT...", "warning");
         lastMessageAt = Date.now();
+        staleWarningShown = false;
         mqttClient.end(true);
       }, 5000);
     }

@@ -561,6 +561,10 @@
     const STREAM_JPEG_QUALITY = 0.42;
     const HOST_SYNC_INTERVAL_MS = 600;
     const VIEWER_MESSAGE_TIMEOUT_MS = 20000;
+    const HOST_RETAIN_CLEAR_DELAY_MS = 300;
+    const STALE_FRAME_WARNING_MS = 5000;
+    const FRAME_RECONNECT_MS = 15000;
+    const RETAINED_FRAME_MAX_AGE_MS = 10000;
     const params = new URLSearchParams(window.location.search);
     const hostname = window.location.hostname;
 
@@ -649,13 +653,17 @@
     let publishInFlight = false;
     let lastInferenceAt = 0;
     let lastPublishAt = 0;
+    let hostFrameId = 0;
     let detectionRunning = false;
     let latestHostItems = [];
     let selectedClasses = new Set(classNames);
     let latestViewerItems = [];
     let latestViewerImageSize = { width: 0, height: 0 };
     let latestPayloadTimestamp = "";
+    let latestViewerFrameId = 0;
     let viewerLastMessageAt = 0;
+    let viewerConnectedAt = 0;
+    let viewerStaleWarningShown = false;
     let viewerWatchdogTimer;
     let mqttManualDisconnect = false;
     let remoteFenceState = null;
@@ -1691,6 +1699,7 @@
     function buildPayload(frameBase64, frameWidth, frameHeight, items, fence, message) {
       return {
         type: "frame",
+        frameId: ++hostFrameId,
         cameraId: getTopic().split("/").pop() || "camera",
         deviceName: getDeviceName(),
         ts: new Date().toISOString(),
@@ -1733,6 +1742,7 @@
     function buildInactivePayload() {
       return {
         type: "frame",
+        frameId: ++hostFrameId,
         cameraId: getTopic().split("/").pop() || "camera",
         deviceName: getDeviceName(),
         ts: new Date().toISOString(),
@@ -1949,19 +1959,43 @@
       }
     }
 
+    function getPayloadAgeMs(payload) {
+      const value = Date.parse(payload.ts || "");
+      return Number.isFinite(value) ? Date.now() - value : 0;
+    }
+
+    function markViewerFrameStale(elapsedMs) {
+      const seconds = Math.max(1, Math.round(elapsedMs / 1000));
+      syncStateText.textContent = "影像停止";
+      setStatus(`影像已停止 ${seconds} 秒，主機端可能離線或沒有持續發布 MQTT 影像。`, "warning");
+    }
+
     function applyIncomingPayload(rawPayload) {
       const payload = normalizeIncomingPayload(rawPayload);
       if (!payload) {
         setStatus("收到 MQTT 訊息，但其中沒有影像資料。", "warning");
         return;
       }
-      viewerLastMessageAt = Date.now();
 
       const timestamp = payload.ts || "";
       if (timestamp && timestamp === latestPayloadTimestamp) {
         return;
       }
+      if (payload.frameId && payload.frameId === latestViewerFrameId) {
+        return;
+      }
+      const payloadAge = getPayloadAgeMs(payload);
+      if (payloadAge > RETAINED_FRAME_MAX_AGE_MS) {
+        latestPayloadTimestamp = timestamp;
+        latestViewerFrameId = Number(payload.frameId || latestViewerFrameId || 0);
+        syncStateText.textContent = "等待新影像";
+        setStatus("收到 MQTT 保留的舊影像，已忽略；正在等待主機端發布新的現場畫面。", "warning");
+        return;
+      }
       latestPayloadTimestamp = timestamp;
+      latestViewerFrameId = Number(payload.frameId || latestViewerFrameId || 0);
+      viewerLastMessageAt = Date.now();
+      viewerStaleWarningShown = false;
 
       const image = payload.image || {};
       const status = payload.status || {};
@@ -2000,6 +2034,7 @@
       setDetections(displayItems);
       updateAlarmState((payload.fence?.insideCount ?? displayItems.filter((item) => item.insideFence).length) > 0, "");
       inferenceStateText.textContent = status.isActive ? "接收中" : "待命";
+      syncStateText.textContent = "即時接收中";
       setStatus(status.message || "已收到遠端影像。", status.isActive ? "success" : "warning");
       insideCountStateText.textContent = String(payload.fence?.insideCount ?? displayItems.filter((item) => item.insideFence).length);
       updateFenceStateText(displayFence);
@@ -2057,10 +2092,17 @@
         updateMqttState(true);
         hydrateShareUrls();
         if (mode === "viewer") {
-          viewerLastMessageAt = Date.now();
+          viewerConnectedAt = Date.now();
+          viewerLastMessageAt = 0;
+          viewerStaleWarningShown = false;
           setStatus(`MQTT 已連線：${topic}`, "success");
         } else {
           setStatus(`MQTT 已連線：${topic}。接著可啟動 webcam。`, "success");
+          window.setTimeout(() => {
+            if (mqttClient && mqttClient.connected) {
+              mqttClient.publish(topic, "", { qos: 1, retain: true });
+            }
+          }, HOST_RETAIN_CLEAR_DELAY_MS);
         }
         mqttClient.subscribe(topic, { qos: 1 }, (error) => {
           if (error) {
@@ -2143,7 +2185,7 @@
         return;
       }
       try {
-        mqttClient.publish(getTopic(), JSON.stringify(payload), { qos: 1, retain: true });
+        mqttClient.publish(getTopic(), JSON.stringify(payload), { qos: 1, retain: false });
         syncStateText.textContent = "已發送";
       } catch {
         syncStateText.textContent = "發送失敗";
@@ -2158,28 +2200,34 @@
       publishInFlight = true;
       lastPublishAt = now;
 
-      const sourceWidth = video.videoWidth || overlay.width || 640;
-      const sourceHeight = video.videoHeight || overlay.height || 360;
-      const scale = Math.min(1, STREAM_MAX_WIDTH / sourceWidth, STREAM_MAX_HEIGHT / sourceHeight);
-      const frameWidth = Math.max(1, Math.round(sourceWidth * scale));
-      const frameHeight = Math.max(1, Math.round(sourceHeight * scale));
+      try {
+        const sourceWidth = video.videoWidth || 0;
+        const sourceHeight = video.videoHeight || 0;
+        if (!sourceWidth || !sourceHeight || video.readyState < 2) {
+          return;
+        }
+        const scale = Math.min(1, STREAM_MAX_WIDTH / sourceWidth, STREAM_MAX_HEIGHT / sourceHeight);
+        const frameWidth = Math.max(1, Math.round(sourceWidth * scale));
+        const frameHeight = Math.max(1, Math.round(sourceHeight * scale));
 
-      if (compositeCanvas.width !== frameWidth || compositeCanvas.height !== frameHeight) {
-        compositeCanvas.width = frameWidth;
-        compositeCanvas.height = frameHeight;
-      }
+        if (compositeCanvas.width !== frameWidth || compositeCanvas.height !== frameHeight) {
+          compositeCanvas.width = frameWidth;
+          compositeCanvas.height = frameHeight;
+        }
 
-      compositeContext.clearRect(0, 0, frameWidth, frameHeight);
-      compositeContext.drawImage(video, 0, 0, frameWidth, frameHeight);
-      const dataUrl = compositeCanvas.toDataURL("image/jpeg", STREAM_JPEG_QUALITY);
-      const frameBase64 = dataUrl.split(",")[1] || "";
-      if (frameBase64) {
-        lastLineSnapshotBase64 = frameBase64;
-        lastLineSnapshotAt = Date.now();
+        compositeContext.clearRect(0, 0, frameWidth, frameHeight);
+        compositeContext.drawImage(video, 0, 0, frameWidth, frameHeight);
+        const dataUrl = compositeCanvas.toDataURL("image/jpeg", STREAM_JPEG_QUALITY);
+        const frameBase64 = dataUrl.split(",")[1] || "";
+        if (frameBase64) {
+          lastLineSnapshotBase64 = frameBase64;
+          lastLineSnapshotAt = Date.now();
+        }
+        const payload = buildPayload(frameBase64, frameWidth, frameHeight, items, fence, "影像辨識中");
+        await publishCurrentState(payload);
+      } finally {
+        publishInFlight = false;
       }
-      const payload = buildPayload(frameBase64, frameWidth, frameHeight, items, fence, "影像辨識中");
-      await publishCurrentState(payload);
-      publishInFlight = false;
     }
 
     async function runDetectionLoop() {
@@ -2239,13 +2287,24 @@
           return;
         }
         if (!viewerLastMessageAt) {
+          if (viewerConnectedAt && Date.now() - viewerConnectedAt >= STALE_FRAME_WARNING_MS && !viewerStaleWarningShown) {
+            viewerStaleWarningShown = true;
+            syncStateText.textContent = "等待影像";
+            setStatus("MQTT 已連線，但尚未收到新的現場影像；請確認主機端已啟動 webcam 並正在發布。", "warning");
+          }
           return;
         }
-        if (Date.now() - viewerLastMessageAt < VIEWER_MESSAGE_TIMEOUT_MS) {
+        const elapsed = Date.now() - viewerLastMessageAt;
+        if (elapsed >= STALE_FRAME_WARNING_MS && !viewerStaleWarningShown) {
+          viewerStaleWarningShown = true;
+          markViewerFrameStale(elapsed);
+        }
+        if (elapsed < FRAME_RECONNECT_MS) {
           return;
         }
         setStatus("長時間沒有收到新畫面，正在強制重新連線 MQTT...", "warning");
         viewerLastMessageAt = Date.now();
+        viewerStaleWarningShown = false;
         mqttClient.end(true);
       }, 5000);
     }
