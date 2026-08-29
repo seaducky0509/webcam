@@ -568,6 +568,10 @@
     const DEFAULT_TOPIC = "vision/seaducky0509/webcam/live01";
     const LEGACY_TOPIC = "vision/demo/cam01";
     const WEBCAM_START_TIMEOUT_MS = 8000;
+    const CAMERA_DARK_LUMA_THRESHOLD = 6;
+    const CAMERA_DARK_FRAME_LIMIT = 8;
+    const CAMERA_FROZEN_FRAME_LIMIT = 16;
+    const CAMERA_RESTART_COOLDOWN_MS = 15000;
     const params = new URLSearchParams(window.location.search);
     const hostname = window.location.hostname;
 
@@ -683,6 +687,14 @@
     let lastAppliedControlRevision = 0;
     let lineNotifyInFlight = false;
     let lineNotifyQueue = [];
+    let cameraDarkFrameCount = 0;
+    let cameraFrozenFrameCount = 0;
+    let lastCameraFrameSignature = "";
+    let currentCameraFault = "";
+    let cameraRestartInFlight = false;
+    let lastCameraRestartAt = 0;
+    let webcamStartGeneration = 0;
+    let webcamAutoRecoveryEnabled = false;
 
     const LINE_CONFIG_STORAGE_KEY = "mqtt-vision-line-config-v1";
     const CAMERA_STORAGE_KEY = "mqtt-vision-camera-device-v1";
@@ -1234,6 +1246,95 @@
       return Promise.race([request, timeout]);
     }
 
+    function resetCameraHealth() {
+      cameraDarkFrameCount = 0;
+      cameraFrozenFrameCount = 0;
+      lastCameraFrameSignature = "";
+      currentCameraFault = "";
+    }
+
+    function inspectCameraFrame(context, width, height) {
+      const pixels = context.getImageData(0, 0, width, height).data;
+      const stepX = Math.max(1, Math.floor(width / 24));
+      const stepY = Math.max(1, Math.floor(height / 18));
+      let lumaTotal = 0;
+      let sampleCount = 0;
+      let signature = "";
+
+      for (let y = Math.floor(stepY / 2); y < height; y += stepY) {
+        for (let x = Math.floor(stepX / 2); x < width; x += stepX) {
+          const offset = (y * width + x) * 4;
+          const luma = Math.round(pixels[offset] * 0.2126 + pixels[offset + 1] * 0.7152 + pixels[offset + 2] * 0.0722);
+          lumaTotal += luma;
+          sampleCount += 1;
+          signature += luma.toString(16).padStart(2, "0");
+        }
+      }
+
+      const averageLuma = sampleCount ? lumaTotal / sampleCount : 0;
+      cameraDarkFrameCount = averageLuma < CAMERA_DARK_LUMA_THRESHOLD ? cameraDarkFrameCount + 1 : 0;
+      cameraFrozenFrameCount = signature && signature === lastCameraFrameSignature ? cameraFrozenFrameCount + 1 : 0;
+      lastCameraFrameSignature = signature;
+
+      if (cameraDarkFrameCount >= CAMERA_DARK_FRAME_LIMIT) {
+        return `攝影機畫面持續過暗或全黑（亮度 ${averageLuma.toFixed(1)}）`;
+      }
+      if (cameraFrozenFrameCount >= CAMERA_FROZEN_FRAME_LIMIT) {
+        return "攝影機畫面已凍結，沒有更新";
+      }
+      return "";
+    }
+
+    function releaseWebcamStream() {
+      detectionRunning = false;
+      if (detectionLoopTimer) {
+        clearTimeout(detectionLoopTimer);
+        detectionLoopTimer = undefined;
+      }
+      if (stream) {
+        for (const track of stream.getTracks()) {
+          track.stop();
+        }
+      }
+      stream = undefined;
+      video.srcObject = null;
+    }
+
+    function scheduleCameraRestart(reason) {
+      if (!detectionRunning || cameraRestartInFlight || Date.now() - lastCameraRestartAt < CAMERA_RESTART_COOLDOWN_MS) {
+        return;
+      }
+      cameraRestartInFlight = true;
+      lastCameraRestartAt = Date.now();
+      currentCameraFault = `${reason}，正在自動重啟 webcam...`;
+      setStatus(currentCameraFault, "warning");
+      window.setTimeout(async () => {
+        releaseWebcamStream();
+        resetCameraHealth();
+        try {
+          await startWebcam({ automatic: true });
+        } finally {
+          cameraRestartInFlight = false;
+        }
+      }, 800);
+    }
+
+    function watchCameraTrack(track) {
+      if (!track) {
+        return;
+      }
+      track.addEventListener("mute", () => {
+        if (detectionRunning) {
+          scheduleCameraRestart("攝影機串流暫停");
+        }
+      });
+      track.addEventListener("ended", () => {
+        if (detectionRunning) {
+          scheduleCameraRestart("攝影機串流中斷");
+        }
+      });
+    }
+
     function syncFenceControlsFromState(targetFence = localFenceState) {
       fenceEnabledSelect.value = targetFence.enabled ? "on" : "off";
       fenceShapeSelect.value = targetFence.shape || "rect";
@@ -1770,7 +1871,8 @@
         },
         status: {
           isActive: true,
-          message
+          message: currentCameraFault || message,
+          cameraFault: Boolean(currentCameraFault)
         }
       };
     }
@@ -2086,7 +2188,7 @@
       updateAlarmState((payload.fence?.insideCount ?? displayItems.filter((item) => item.insideFence).length) > 0, "");
       inferenceStateText.textContent = status.isActive ? "接收中" : "待命";
       syncStateText.textContent = "即時接收中";
-      setStatus(status.message || "已收到遠端影像。", status.isActive ? "success" : "warning");
+      setStatus(status.message || "已收到遠端影像。", status.isActive && !status.cameraFault ? "success" : "warning");
       insideCountStateText.textContent = String(payload.fence?.insideCount ?? displayItems.filter((item) => item.insideFence).length);
       updateFenceStateText(displayFence);
 
@@ -2271,6 +2373,14 @@
 
         compositeContext.clearRect(0, 0, frameWidth, frameHeight);
         compositeContext.drawImage(video, 0, 0, frameWidth, frameHeight);
+        const cameraFault = inspectCameraFrame(compositeContext, frameWidth, frameHeight);
+        if (cameraFault) {
+          currentCameraFault = `${cameraFault}；系統將自動重啟攝影機。`;
+          setStatus(currentCameraFault, "warning");
+        } else if (currentCameraFault) {
+          currentCameraFault = "";
+          setStatus("webcam 畫面已恢復，影像辨識與 MQTT 發送中。", "success");
+        }
         const dataUrl = compositeCanvas.toDataURL("image/jpeg", STREAM_JPEG_QUALITY);
         const frameBase64 = dataUrl.split(",")[1] || "";
         if (frameBase64) {
@@ -2279,6 +2389,9 @@
         }
         const payload = buildPayload(frameBase64, frameWidth, frameHeight, items, fence, "影像辨識中");
         await publishCurrentState(payload);
+        if (cameraFault) {
+          scheduleCameraRestart(cameraFault);
+        }
       } finally {
         publishInFlight = false;
       }
@@ -2364,18 +2477,10 @@
     }
 
     function stopWebcam() {
-      detectionRunning = false;
-      if (detectionLoopTimer) {
-        clearTimeout(detectionLoopTimer);
-        detectionLoopTimer = undefined;
-      }
-      if (stream) {
-        for (const track of stream.getTracks()) {
-          track.stop();
-        }
-      }
-      stream = undefined;
-      video.srcObject = null;
+      webcamAutoRecoveryEnabled = false;
+      webcamStartGeneration += 1;
+      releaseWebcamStream();
+      resetCameraHealth();
       clearOverlay();
       drawFence(overlay.width || 640, overlay.height || 360, localFenceState);
       latestHostItems = [];
@@ -2442,7 +2547,9 @@
       }
     }
 
-    async function startWebcam() {
+    async function startWebcam(options = {}) {
+      const automatic = options && options.automatic === true;
+      const startGeneration = ++webcamStartGeneration;
       if (mode !== "host") {
         setStatus("觀看端不會啟動本機 webcam。", "warning");
         return;
@@ -2455,9 +2562,10 @@
         setStatus("這個瀏覽器不支援 webcam。", "error");
         return;
       }
+      webcamAutoRecoveryEnabled = true;
 
       try {
-        setStatus("正在啟動 webcam...", "info");
+        setStatus(automatic ? "偵測到攝影機異常，正在自動重啟 webcam..." : "正在啟動 webcam...", "info");
         updateButtons(false);
         stopButton.disabled = true;
         if (stream) {
@@ -2470,19 +2578,32 @@
           video: videoConstraints,
           audio: false
         });
+        if (startGeneration !== webcamStartGeneration) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
         video.srcObject = stream;
         await video.play();
+        resetCameraHealth();
+        watchCameraTrack(stream.getVideoTracks()[0]);
         resizeOverlay(video.videoWidth, video.videoHeight);
         clearOverlay();
         detectionRunning = true;
         updateButtons(true);
-        setStatus("webcam 已啟動，影像辨識與 MQTT 發送中。", "success");
+        setStatus(automatic ? "webcam 已自動重啟，正在確認現場畫面。" : "webcam 已啟動，影像辨識與 MQTT 發送中。", "success");
         runDetectionLoop();
         await refreshDiagnostics();
       } catch (error) {
         updateButtons(false);
         setStatus(describeError(error), "error");
         await refreshDiagnostics();
+        if (automatic && webcamAutoRecoveryEnabled) {
+          window.setTimeout(() => {
+            if (webcamAutoRecoveryEnabled && !stream && !cameraRestartInFlight) {
+              startWebcam({ automatic: true });
+            }
+          }, CAMERA_RESTART_COOLDOWN_MS);
+        }
       }
     }
 
@@ -2636,7 +2757,7 @@
     });
     editFenceToggle.addEventListener("change", updateOverlayEditMode);
 
-    startButton.addEventListener("click", startWebcam);
+    startButton.addEventListener("click", () => startWebcam());
     stopButton.addEventListener("click", stopWebcam);
     connectMqttButton.addEventListener("click", connectMqtt);
     disconnectMqttButton.addEventListener("click", disconnectMqtt);

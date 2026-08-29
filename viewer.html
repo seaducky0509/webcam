@@ -1017,7 +1017,7 @@
 
       const active = !(payload.status) || payload.status.isActive !== false;
       const message = payload.status?.message || "已收到遠端影像。";
-      setStatus(message, active ? "success" : "warning");
+      setStatus(message, active && !payload.status?.cameraFault ? "success" : "warning");
 
       if (!active || !image.base64) {
         frame.removeAttribute("src");
