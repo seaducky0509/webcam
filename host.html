@@ -572,6 +572,8 @@
     const CAMERA_DARK_FRAME_LIMIT = 8;
     const CAMERA_FROZEN_FRAME_LIMIT = 16;
     const CAMERA_RESTART_COOLDOWN_MS = 15000;
+    const CAMERA_AUTO_START_KEY = "mqtt-vision-camera-auto-start-v1";
+    const CAMERA_RELOAD_ATTEMPTS_KEY = "mqtt-vision-camera-reload-attempts-v1";
     const params = new URLSearchParams(window.location.search);
     const hostname = window.location.hostname;
 
@@ -1251,6 +1253,41 @@
       cameraFrozenFrameCount = 0;
       lastCameraFrameSignature = "";
       currentCameraFault = "";
+    }
+
+    function clearCameraReloadRecovery() {
+      try {
+        sessionStorage.removeItem(CAMERA_AUTO_START_KEY);
+        sessionStorage.removeItem(CAMERA_RELOAD_ATTEMPTS_KEY);
+      } catch {
+        // Session storage is optional; webcam operation can continue without it.
+      }
+    }
+
+    function scheduleCameraPageRecovery() {
+      try {
+        const attempts = Number(sessionStorage.getItem(CAMERA_RELOAD_ATTEMPTS_KEY) || 0);
+        if (attempts >= 2) {
+          return false;
+        }
+        sessionStorage.setItem(CAMERA_RELOAD_ATTEMPTS_KEY, String(attempts + 1));
+        sessionStorage.setItem(CAMERA_AUTO_START_KEY, "1");
+        setStatus("攝影機請求卡住，正在重新載入主機頁並自動續接 webcam...", "warning");
+        window.setTimeout(() => window.location.reload(), 1000);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    function shouldAutoStartAfterReload() {
+      try {
+        const shouldStart = sessionStorage.getItem(CAMERA_AUTO_START_KEY) === "1";
+        sessionStorage.removeItem(CAMERA_AUTO_START_KEY);
+        return shouldStart;
+      } catch {
+        return false;
+      }
     }
 
     function inspectCameraFrame(context, width, height) {
@@ -2563,6 +2600,9 @@
         return;
       }
       webcamAutoRecoveryEnabled = true;
+      if (!automatic) {
+        clearCameraReloadRecovery();
+      }
 
       try {
         setStatus(automatic ? "偵測到攝影機異常，正在自動重啟 webcam..." : "正在啟動 webcam...", "info");
@@ -2584,6 +2624,7 @@
         }
         video.srcObject = stream;
         await video.play();
+        clearCameraReloadRecovery();
         resetCameraHealth();
         watchCameraTrack(stream.getVideoTracks()[0]);
         resizeOverlay(video.videoWidth, video.videoHeight);
@@ -2597,6 +2638,9 @@
         updateButtons(false);
         setStatus(describeError(error), "error");
         await refreshDiagnostics();
+        if (error && error.name === "TimeoutError" && webcamAutoRecoveryEnabled && scheduleCameraPageRecovery()) {
+          return;
+        }
         if (automatic && webcamAutoRecoveryEnabled) {
           window.setTimeout(() => {
             if (webcamAutoRecoveryEnabled && !stream && !cameraRestartInFlight) {
@@ -2620,6 +2664,10 @@
         modelStateText.textContent = "就緒";
         setStatus(mqttClient && mqttClient.connected ? "模型已就緒，可啟動 webcam。" : "模型已就緒，請先連線 MQTT 再啟動 webcam。", "success");
         startButton.disabled = false;
+        if (shouldAutoStartAfterReload()) {
+          setStatus("主機頁已重新載入，正在自動續接 webcam...", "info");
+          window.setTimeout(() => startWebcam({ automatic: true }), 300);
+        }
       } catch {
         modelStateText.textContent = "失敗";
         setStatus("模型載入失敗，請檢查 CDN 是否可用。", "error");
