@@ -426,6 +426,7 @@
     let localControlRevisionCounter = 0;
     let pendingControlRevision = 0;
     let lastAppliedControlRevision = 0;
+    let hasViewerControlConfig = false;
 
     const localFenceState = {
       enabled: true,
@@ -548,6 +549,12 @@
 
     function loadViewerControlConfig() {
       try {
+        hasViewerControlConfig = [
+          STORE_KEYS.selectedClasses,
+          STORE_KEYS.mqttAlert,
+          STORE_KEYS.lineAlert,
+          STORE_KEYS.lineClear
+        ].some((key) => localStorage.getItem(key) !== null);
         const storedClasses = JSON.parse(localStorage.getItem(STORE_KEYS.selectedClasses) || "null");
         if (Array.isArray(storedClasses)) {
           const nextClasses = storedClasses.filter((name) => classNames.includes(name));
@@ -572,6 +579,7 @@
 
     function saveViewerControlConfig() {
       try {
+        hasViewerControlConfig = true;
         localStorage.setItem(STORE_KEYS.selectedClasses, JSON.stringify(classNames.filter((name) => selectedClasses.has(name))));
         localStorage.setItem(STORE_KEYS.mqttAlert, String(mqttAlertToggle.checked));
         localStorage.setItem(STORE_KEYS.lineAlert, String(lineAlertToggle.checked));
@@ -1160,7 +1168,9 @@
         lastMessageAt = 0;
         staleWarningShown = false;
         setStatus(`MQTT 已連線：${topic}`, "success");
-        publishControlState("遠端控制設定已同步到主機端。");
+        if (hasViewerControlConfig) {
+          publishControlState("遠端控制設定已同步到主機端。");
+        }
         mqttClient.subscribe(topic, { qos: 1 }, (error) => {
           if (error) {
             mqttStateText.textContent = "訂閱失敗";
