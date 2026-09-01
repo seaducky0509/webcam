@@ -957,9 +957,17 @@
         if (!acceptedSourceId) {
           acceptedSourceId = payload.sourceId;
         } else if (payload.sourceId !== acceptedSourceId) {
-          mqttStateText.textContent = "忽略其他來源";
-          setStatus("收到同 Topic 的其他來源影像，已忽略；目前只接受第一個新版主機端來源。", "warning");
-          return false;
+          const currentSourceFresh = lastMessageAt && Date.now() - lastMessageAt < STALE_FRAME_WARNING_MS;
+          if (currentSourceFresh) {
+            mqttStateText.textContent = "忽略其他來源";
+            setStatus("收到同 Topic 的其他來源影像，已忽略；目前仍在接收原主機端來源。", "warning");
+            return false;
+          }
+          acceptedSourceId = payload.sourceId;
+          latestTimestamp = "";
+          latestFrameId = 0;
+          mqttStateText.textContent = "切換主機來源";
+          setStatus("原主機來源已停止，已自動切換到新的主機端影像。", "warning");
         }
       }
       const payloadAge = getPayloadAgeMs(payload);
@@ -1141,15 +1149,16 @@
           handleAlarmPayload(payload);
           return;
         }
-        if (payload.ts && payload.ts === latestTimestamp) {
+        const sameAcceptedSource = !payload.sourceId || !acceptedSourceId || payload.sourceId === acceptedSourceId;
+        if (sameAcceptedSource && payload.ts && payload.ts === latestTimestamp) {
           return;
         }
-        if (payload.frameId && payload.frameId === latestFrameId) {
+        if (sameAcceptedSource && payload.frameId && payload.frameId === latestFrameId) {
           return;
         }
-        latestTimestamp = payload.ts || "";
-        latestFrameId = Number(payload.frameId || latestFrameId || 0);
         if (applyFramePayload(payload) !== false) {
+          latestTimestamp = payload.ts || "";
+          latestFrameId = Number(payload.frameId || latestFrameId || 0);
           lastMessageAt = Date.now();
         }
       });

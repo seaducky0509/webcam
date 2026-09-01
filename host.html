@@ -565,6 +565,8 @@
     const STALE_FRAME_WARNING_MS = 5000;
     const FRAME_RECONNECT_MS = 15000;
     const RETAINED_FRAME_MAX_AGE_MS = 10000;
+    const INFERENCE_TIMEOUT_MS = 8000;
+    const INFERENCE_ERROR_LIMIT = 3;
     const DEFAULT_TOPIC = "vision/seaducky0509/webcam/live01";
     const LEGACY_TOPIC = "vision/demo/cam01";
     const WEBCAM_START_TIMEOUT_MS = 8000;
@@ -697,10 +699,14 @@
     let lastCameraRestartAt = 0;
     let webcamStartGeneration = 0;
     let webcamAutoRecoveryEnabled = false;
+    let consecutiveInferenceErrors = 0;
+    let lastSuccessfulInferenceAt = 0;
+    let inferenceRecoveryInFlight = false;
 
     const LINE_CONFIG_STORAGE_KEY = "mqtt-vision-line-config-v1";
     const CAMERA_STORAGE_KEY = "mqtt-vision-camera-device-v1";
     const SOURCE_ID_STORAGE_KEY = "mqtt-vision-host-source-id-v1";
+    const INFERENCE_RELOAD_ATTEMPTS_KEY = "mqtt-vision-inference-reload-attempts-v1";
     const LINE_NOTIFY_MAX_RETRIES = 4;
 
     const compositeCanvas = document.createElement("canvas");
@@ -904,10 +910,10 @@
     }
 
     function getSourceId() {
-      let sourceId = localStorage.getItem(SOURCE_ID_STORAGE_KEY);
+      let sourceId = sessionStorage.getItem(SOURCE_ID_STORAGE_KEY);
       if (!sourceId) {
         sourceId = `host-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-        localStorage.setItem(SOURCE_ID_STORAGE_KEY, sourceId);
+        sessionStorage.setItem(SOURCE_ID_STORAGE_KEY, sourceId);
       }
       return sourceId;
     }
@@ -1264,7 +1270,7 @@
       }
     }
 
-    function scheduleCameraPageRecovery() {
+    function scheduleCameraPageRecovery(message = "攝影機請求卡住，正在重新載入主機頁並自動續接 webcam...") {
       try {
         const attempts = Number(sessionStorage.getItem(CAMERA_RELOAD_ATTEMPTS_KEY) || 0);
         if (attempts >= 2) {
@@ -1272,12 +1278,53 @@
         }
         sessionStorage.setItem(CAMERA_RELOAD_ATTEMPTS_KEY, String(attempts + 1));
         sessionStorage.setItem(CAMERA_AUTO_START_KEY, "1");
-        setStatus("攝影機請求卡住，正在重新載入主機頁並自動續接 webcam...", "warning");
+        setStatus(message, "warning");
         window.setTimeout(() => window.location.reload(), 1000);
         return true;
       } catch {
         return false;
       }
+    }
+
+    function clearInferenceRecovery() {
+      consecutiveInferenceErrors = 0;
+      inferenceRecoveryInFlight = false;
+      try {
+        sessionStorage.removeItem(INFERENCE_RELOAD_ATTEMPTS_KEY);
+      } catch {
+        // Session storage is optional; inference can continue without it.
+      }
+    }
+
+    function scheduleInferencePageRecovery(reason) {
+      if (inferenceRecoveryInFlight) {
+        return true;
+      }
+      try {
+        const attempts = Number(sessionStorage.getItem(INFERENCE_RELOAD_ATTEMPTS_KEY) || 0);
+        if (attempts >= 2) {
+          return false;
+        }
+        inferenceRecoveryInFlight = true;
+        sessionStorage.setItem(INFERENCE_RELOAD_ATTEMPTS_KEY, String(attempts + 1));
+        sessionStorage.setItem(CAMERA_AUTO_START_KEY, "1");
+        inferenceStateText.textContent = "辨識引擎正在自動恢復";
+        setStatus(`${reason}，正在重新載入主機頁並自動恢復辨識...`, "warning");
+        window.setTimeout(() => window.location.reload(), 1000);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    function detectWithTimeout(input) {
+      let timeoutId;
+      const timeout = new Promise((_, reject) => {
+        timeoutId = window.setTimeout(() => {
+          reject(new DOMException(`模型推論超過 ${INFERENCE_TIMEOUT_MS / 1000} 秒。`, "TimeoutError"));
+        }, INFERENCE_TIMEOUT_MS);
+      });
+      return Promise.race([model.detect(input), timeout]).finally(() => window.clearTimeout(timeoutId));
     }
 
     function shouldAutoStartAfterReload() {
@@ -1324,6 +1371,9 @@
 
     function releaseWebcamStream() {
       detectionRunning = false;
+      consecutiveInferenceErrors = 0;
+      lastSuccessfulInferenceAt = 0;
+      inferenceRecoveryInFlight = false;
       if (detectionLoopTimer) {
         clearTimeout(detectionLoopTimer);
         detectionLoopTimer = undefined;
@@ -1909,7 +1959,10 @@
         status: {
           isActive: true,
           message: currentCameraFault || message,
-          cameraFault: Boolean(currentCameraFault)
+          cameraFault: Boolean(currentCameraFault),
+          inferenceHealthy: consecutiveInferenceErrors === 0 && lastSuccessfulInferenceAt > 0,
+          inferenceLastSuccessTs: lastSuccessfulInferenceAt ? new Date(lastSuccessfulInferenceAt).toISOString() : "",
+          inferenceErrors: consecutiveInferenceErrors
         }
       };
     }
@@ -2087,6 +2140,19 @@
       }
     }
 
+    function notifyCurrentLineAlarm(message = "LINE 通知已開啟，電子圍籬內目前有目標。") {
+      if (!lineAlertToggle.checked || !alarmActive) {
+        return;
+      }
+      const insideItems = latestHostItems.filter((item) => item.insideFence);
+      if (!insideItems.length) {
+        return;
+      }
+      const fence = normalizeFenceState(localFenceState);
+      const snapshot = captureLineSnapshotBase64(latestHostItems, fence);
+      enqueueLineNotify(buildLineEventPayload("enter", insideItems.length, latestHostItems, message, snapshot));
+    }
+
     function applyControlPayload(payload) {
       if (typeof payload.revision === "number") {
         lastAppliedControlRevision = payload.revision;
@@ -2111,9 +2177,13 @@
         mqttAlertToggle.checked = control.mqttAlertEnabled;
       }
       if (typeof control.lineAlertEnabled === "boolean") {
+        const wasLineEnabled = lineAlertToggle.checked;
         lineAlertToggle.checked = control.lineAlertEnabled;
         saveLineConfig();
         updateLineStatus(lineAlertToggle.checked ? (lineWebhookUrlInput.value.trim() ? "待命中" : "請填入 GAS Web App URL") : "未啟用");
+        if (!wasLineEnabled && lineAlertToggle.checked) {
+          notifyCurrentLineAlarm();
+        }
       }
       if (typeof control.lineClearEnabled === "boolean") {
         lineClearToggle.checked = control.lineClearEnabled;
@@ -2161,9 +2231,17 @@
         if (!acceptedViewerSourceId) {
           acceptedViewerSourceId = payload.sourceId;
         } else if (payload.sourceId !== acceptedViewerSourceId) {
-          syncStateText.textContent = "忽略其他來源";
-          setStatus("收到同 Topic 的其他來源影像，已忽略；目前只接受第一個新版主機端來源。", "warning");
-          return;
+          const currentSourceFresh = viewerLastMessageAt && Date.now() - viewerLastMessageAt < STALE_FRAME_WARNING_MS;
+          if (currentSourceFresh) {
+            syncStateText.textContent = "忽略其他來源";
+            setStatus("收到同 Topic 的其他來源影像，已忽略；目前仍在接收原主機端來源。", "warning");
+            return;
+          }
+          acceptedViewerSourceId = payload.sourceId;
+          latestPayloadTimestamp = "";
+          latestViewerFrameId = 0;
+          syncStateText.textContent = "切換主機來源";
+          setStatus("原主機來源已停止，已自動切換到新的主機端影像。", "warning");
         }
       }
 
@@ -2454,7 +2532,9 @@
       inferenceStateText.textContent = "辨識中";
 
       try {
-        const predictions = await model.detect(video);
+        const predictions = await detectWithTimeout(video);
+        lastSuccessfulInferenceAt = Date.now();
+        clearInferenceRecovery();
         const filtered = predictions.filter((prediction) => prediction.score >= 0.55 && selectedClasses.has(prediction.class));
         const fence = normalizeFenceState(localFenceState);
         const items = filtered.map((prediction) => toDetectionItem(prediction, video.videoWidth, video.videoHeight, fence));
@@ -2463,13 +2543,38 @@
         setDetections(items);
         const lineSnapshot = captureLineSnapshotBase64(items, fence);
         maybePublishAlarm(items, fence, lineSnapshot);
-        inferenceStateText.textContent = items.length ? "已找到目標" : "未找到目標";
+        const highestPersonScore = predictions
+          .filter((prediction) => prediction.class === "person")
+          .reduce((highest, prediction) => Math.max(highest, prediction.score || 0), 0);
+        if (items.length) {
+          inferenceStateText.textContent = `已找到 ${items.length} 個目標`;
+        } else if (highestPersonScore > 0) {
+          inferenceStateText.textContent = selectedClasses.has("person")
+            ? `偵測到人 ${Math.round(highestPersonScore * 100)}%，低於 55% 門檻`
+            : `偵測到人 ${Math.round(highestPersonScore * 100)}%，但「人」未選取`;
+        } else {
+          inferenceStateText.textContent = "未找到目標";
+        }
         await pushCurrentFrame(items, fence);
-      } catch {
-        inferenceStateText.textContent = "辨識失敗";
+      } catch (error) {
+        consecutiveInferenceErrors += 1;
+        const errorName = error?.name || "Error";
+        const errorMessage = error?.message || "未知錯誤";
+        inferenceStateText.textContent = `辨識失敗：${errorName}`;
+        setStatus(`辨識引擎錯誤（${consecutiveInferenceErrors}/${INFERENCE_ERROR_LIMIT}）：${errorMessage}`, "error");
+        if (errorName === "TimeoutError" || consecutiveInferenceErrors >= INFERENCE_ERROR_LIMIT) {
+          const recovered = scheduleInferencePageRecovery(`辨識引擎失去回應：${errorMessage}`);
+          if (!recovered) {
+            detectionRunning = false;
+            updateButtons(false);
+            setStatus("辨識引擎連續恢復失敗，請重新整理主機端後再啟動 webcam。", "error");
+          }
+        }
       }
 
-      scheduleNextDetection(30);
+      if (!inferenceRecoveryInFlight) {
+        scheduleNextDetection(30);
+      }
     }
 
     function publishInactiveState() {
@@ -2630,6 +2735,9 @@
         resizeOverlay(video.videoWidth, video.videoHeight);
         clearOverlay();
         detectionRunning = true;
+        consecutiveInferenceErrors = 0;
+        lastSuccessfulInferenceAt = Date.now();
+        inferenceRecoveryInFlight = false;
         updateButtons(true);
         setStatus(automatic ? "webcam 已自動重啟，正在確認現場畫面。" : "webcam 已啟動，影像辨識與 MQTT 發送中。", "success");
         runDetectionLoop();
@@ -2660,7 +2768,12 @@
       modelStateText.textContent = "載入中";
       setStatus("正在載入 coco-ssd 模型...", "info");
       try {
+        await tf.ready();
         model = await cocoSsd.load({ base: "lite_mobilenet_v2" });
+        const warmupCanvas = document.createElement("canvas");
+        warmupCanvas.width = 32;
+        warmupCanvas.height = 32;
+        await detectWithTimeout(warmupCanvas);
         modelStateText.textContent = "就緒";
         setStatus(mqttClient && mqttClient.connected ? "模型已就緒，可啟動 webcam。" : "模型已就緒，請先連線 MQTT 再啟動 webcam。", "success");
         startButton.disabled = false;
@@ -2789,6 +2902,9 @@
       input.addEventListener("change", () => {
         saveLineConfig();
         updateLineStatus(lineAlertToggle.checked ? (lineWebhookUrlInput.value.trim() ? "待命中" : "請填入 GAS Web App URL") : "未啟用");
+        if (input === lineAlertToggle && lineAlertToggle.checked) {
+          notifyCurrentLineAlarm();
+        }
       });
     });
     [lineWebhookUrlInput, lineSecretInput].forEach((input) => {
