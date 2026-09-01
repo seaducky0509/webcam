@@ -74,6 +74,43 @@
       font-size: 13px;
     }
 
+    .mode-banner {
+      border: 1px solid rgba(96, 165, 250, 0.5);
+      background: rgba(37, 99, 235, 0.16);
+      padding: 18px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .mode-banner h2 {
+      font-size: clamp(24px, 3vw, 36px);
+      color: #eff6ff;
+    }
+
+    .mode-status-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .mode-status-item {
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      background: rgba(2, 6, 23, 0.55);
+      padding: 10px 12px;
+      display: grid;
+      gap: 4px;
+    }
+
+    .mode-status-item span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .mode-status-item strong {
+      font-size: 15px;
+      color: #e2e8f0;
+    }
+
     .panel {
       border: 1px solid var(--border);
       background: var(--panel);
@@ -302,7 +339,8 @@
       .compact-grid,
       .metrics-grid,
       .field-row,
-      .class-grid {
+      .class-grid,
+      .mode-status-grid {
         grid-template-columns: 1fr;
       }
 
@@ -321,6 +359,24 @@
         <p class="subtitle" id="pageIntro">本機可直接讀取 webcam 做物件辨識，再透過 MQTT 傳送影像與辨識結果；其他電腦或手機只要輸入相同 Broker、Port、Topic 就能監看。</p>
       </div>
       <div class="badge" id="modeBadge">主機模式</div>
+    </section>
+
+    <section class="mode-banner" id="modeBanner">
+      <h2 id="modeTitle">MQTT 主機端 / 攝影機發送端</h2>
+      <div class="mode-status-grid">
+        <div class="mode-status-item">
+          <span>攝影機</span>
+          <strong id="cameraRunState">未啟動</strong>
+        </div>
+        <div class="mode-status-item">
+          <span>MQTT</span>
+          <strong id="mqttRunState">未連線</strong>
+        </div>
+        <div class="mode-status-item">
+          <span>影像發布</span>
+          <strong id="publishRunState">待命</strong>
+        </div>
+      </div>
     </section>
 
     <section class="panel">
@@ -559,7 +615,8 @@
     const STREAM_MAX_WIDTH = 854;
     const STREAM_MAX_HEIGHT = 480;
     const STREAM_JPEG_QUALITY = 0.42;
-    const HOST_SYNC_INTERVAL_MS = 600;
+    const HOST_SYNC_INTERVAL_MS = 240;
+    const MQTT_FRAME_BUFFER_LIMIT_BYTES = 900000;
     const VIEWER_MESSAGE_TIMEOUT_MS = 20000;
     const HOST_RETAIN_CLEAR_DELAY_MS = 300;
     const STALE_FRAME_WARNING_MS = 5000;
@@ -586,6 +643,10 @@
     const stage = document.getElementById("stage");
     const statusText = document.getElementById("status");
     const modeBadge = document.getElementById("modeBadge");
+    const modeTitle = document.getElementById("modeTitle");
+    const cameraRunStateText = document.getElementById("cameraRunState");
+    const mqttRunStateText = document.getElementById("mqttRunState");
+    const publishRunStateText = document.getElementById("publishRunState");
     const pageIntro = document.getElementById("pageIntro");
     const hintText = document.getElementById("hint");
     const brokerInput = document.getElementById("brokerInput");
@@ -677,6 +738,7 @@
     let viewerConnectedAt = 0;
     let viewerStaleWarningShown = false;
     let viewerWatchdogTimer;
+    let mqttRestartTimer;
     let mqttManualDisconnect = false;
     let remoteFenceState = null;
     let alarmActive = false;
@@ -1088,6 +1150,8 @@
       }
       startButton.disabled = !model || isRunning;
       stopButton.disabled = !isRunning;
+      cameraRunStateText.textContent = isRunning ? "已啟動" : "未啟動";
+      publishRunStateText.textContent = isRunning && mqttClient && mqttClient.connected ? "正在發布影像" : "待命";
     }
 
     function updateSelectedSummary() {
@@ -1821,6 +1885,8 @@
       portInput.disabled = connected;
       topicInput.disabled = connected;
       syncStateText.textContent = connected ? "已連線" : "未連線";
+      mqttRunStateText.textContent = connected ? "已連線" : "未連線";
+      publishRunStateText.textContent = connected && detectionRunning ? "正在發布影像" : "待命";
     }
 
     function buildViewerUrlFromBase(baseUrl) {
@@ -2172,6 +2238,19 @@
         lineClearToggle.checked = control.lineClearEnabled;
         saveLineConfig();
       }
+      if (control.webcamCommand === "start") {
+        window.setTimeout(() => {
+          if (!detectionRunning) {
+            startWebcam({ automatic: true });
+          }
+        }, 0);
+      } else if (control.webcamCommand === "stop") {
+        window.setTimeout(() => {
+          if (detectionRunning || stream) {
+            stopWebcam();
+          }
+        }, 0);
+      }
       redrawCurrentOverlay();
       setStatus("已套用遠端控制設定。", "success");
     }
@@ -2315,6 +2394,11 @@
         return;
       }
 
+      if (mqttRestartTimer) {
+        clearTimeout(mqttRestartTimer);
+        mqttRestartTimer = undefined;
+      }
+
       if (mqttClient) {
         mqttClient.end(true);
       }
@@ -2340,9 +2424,13 @@
         };
       }
 
-      mqttClient = mqtt.connect(getBrokerUrl(), connectOptions);
+      const client = mqtt.connect(getBrokerUrl(), connectOptions);
+      mqttClient = client;
 
-      mqttClient.on("connect", () => {
+      client.on("connect", () => {
+        if (client !== mqttClient) {
+          return;
+        }
         updateMqttState(true);
         hydrateShareUrls();
         if (mode === "viewer") {
@@ -2358,7 +2446,10 @@
             }
           }, HOST_RETAIN_CLEAR_DELAY_MS);
         }
-        mqttClient.subscribe(topic, { qos: 1 }, (error) => {
+        client.subscribe(topic, { qos: 1 }, (error) => {
+          if (client !== mqttClient) {
+            return;
+          }
           if (error) {
             syncStateText.textContent = "訂閱失敗";
             setStatus("MQTT Topic 訂閱失敗。", "error");
@@ -2368,7 +2459,10 @@
         });
       });
 
-      mqttClient.on("message", (_topic, message) => {
+      client.on("message", (_topic, message) => {
+        if (client !== mqttClient) {
+          return;
+        }
         let parsed;
         try {
           parsed = JSON.parse(message.toString());
@@ -2397,19 +2491,28 @@
         applyIncomingPayload(parsed);
       });
 
-      mqttClient.on("reconnect", () => {
+      client.on("reconnect", () => {
+        if (client !== mqttClient) {
+          return;
+        }
         syncStateText.textContent = "重新連線中";
         setStatus("MQTT 連線中斷，正在自動重連...", "warning");
       });
 
-      mqttClient.on("close", () => {
+      client.on("close", () => {
+        if (client !== mqttClient) {
+          return;
+        }
         updateMqttState(false);
         if (!mqttManualDisconnect) {
           setStatus("MQTT 連線已關閉，等待自動重連...", "warning");
         }
       });
 
-      mqttClient.on("error", (error) => {
+      client.on("error", (error) => {
+        if (client !== mqttClient) {
+          return;
+        }
         syncStateText.textContent = "錯誤";
         const reason = error && error.message ? error.message : "unknown";
         setStatus(`MQTT 連線失敗：${reason}`, "error");
@@ -2418,12 +2521,33 @@
 
     function disconnectMqtt() {
       mqttManualDisconnect = true;
+      if (mqttRestartTimer) {
+        clearTimeout(mqttRestartTimer);
+        mqttRestartTimer = undefined;
+      }
       if (mqttClient) {
         mqttClient.end(true);
         mqttClient = undefined;
       }
       updateMqttState(false);
       setStatus("MQTT 已中斷。");
+    }
+
+    function restartViewerMqttConnection() {
+      if (mode !== "viewer" || mqttManualDisconnect || mqttRestartTimer) {
+        return;
+      }
+      const staleClient = mqttClient;
+      mqttClient = undefined;
+      if (staleClient) {
+        staleClient.end(true);
+      }
+      mqttRestartTimer = window.setTimeout(() => {
+        mqttRestartTimer = undefined;
+        if (!mqttManualDisconnect) {
+          connectMqtt();
+        }
+      }, 500);
     }
 
     function scheduleNextDetection(delayMs) {
@@ -2433,16 +2557,36 @@
       detectionLoopTimer = window.setTimeout(runDetectionLoop, delayMs);
     }
 
+    function getMqttBufferedAmount() {
+      const streamSocket = mqttClient?.stream?.socket || mqttClient?.stream?._socket || mqttClient?.stream;
+      const values = [
+        streamSocket?.bufferedAmount,
+        streamSocket?.bufferSize,
+        mqttClient?.stream?.writableLength,
+        mqttClient?.queue?.length ? mqttClient.queue.length * 65536 : 0
+      ].filter((value) => Number.isFinite(value));
+      return values.length ? Math.max(...values) : 0;
+    }
+
     async function publishCurrentState(payload) {
       if (!mqttClient || !mqttClient.connected) {
         syncStateText.textContent = "未連線";
         return;
       }
+      if (getMqttBufferedAmount() > MQTT_FRAME_BUFFER_LIMIT_BYTES) {
+        syncStateText.textContent = "略過舊幀";
+        publishRunStateText.textContent = "即時跳幀中";
+        return;
+      }
       try {
-        mqttClient.publish(getTopic(), JSON.stringify(payload), { qos: 1, retain: false });
+        // Live video favors the newest frame; QoS 0 prevents old JPEG frames from
+        // blocking reliable control messages in the broker/client queue.
+        mqttClient.publish(getTopic(), JSON.stringify(payload), { qos: 0, retain: false });
         syncStateText.textContent = "已發送";
+        publishRunStateText.textContent = detectionRunning ? "正在發布影像" : "待命";
       } catch {
         syncStateText.textContent = "發送失敗";
+        publishRunStateText.textContent = "發送失敗";
       }
     }
 
@@ -2597,7 +2741,7 @@
         setStatus("長時間沒有收到新畫面，正在強制重新連線 MQTT...", "warning");
         viewerLastMessageAt = Date.now();
         viewerStaleWarningShown = false;
-        mqttClient.end(true);
+        restartViewerMqttConnection();
       }, 5000);
     }
 
@@ -2775,6 +2919,9 @@
       modeText.textContent = mode === "host" ? "主機" : "觀看端";
       if (mode === "viewer") {
         modeBadge.textContent = "觀看端模式";
+        modeTitle.textContent = "MQTT 觀看端 / 遠端監看模式";
+        cameraRunStateText.textContent = "不使用本機鏡頭";
+        publishRunStateText.textContent = "接收影像";
         pageIntro.textContent = "觀看端只訂閱 MQTT，並顯示最新影像、辨識框、辨識文字與電子圍籬結果。";
         video.classList.add("hidden");
         remoteFrame.classList.remove("hidden");
@@ -2782,6 +2929,9 @@
         hintText.textContent = "觀看端不會在本機執行辨識，只接收 MQTT 傳來的結果。";
       } else {
         modeBadge.textContent = "主機模式";
+        modeTitle.textContent = "MQTT 主機端 / 攝影機發送端";
+        cameraRunStateText.textContent = detectionRunning ? "已啟動" : "未啟動";
+        publishRunStateText.textContent = detectionRunning && mqttClient && mqttClient.connected ? "正在發布影像" : "待命";
         remoteFrame.classList.add("hidden");
         video.classList.remove("hidden");
         updateLineStatus(lineAlertToggle.checked ? (lineWebhookUrlInput.value.trim() ? "待命中" : "請填入 GAS Web App URL") : "未啟用");

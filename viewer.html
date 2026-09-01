@@ -67,6 +67,12 @@
       line-height: 1.4;
     }
     .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .remote-control-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+    }
     button {
       padding: 11px 16px;
       border: 1px solid transparent;
@@ -143,6 +149,7 @@
     .hidden { display: none !important; }
     @media (max-width: 980px) {
       .config-grid, .compact-grid, .metrics-grid, .class-grid, .field-row { grid-template-columns: 1fr; }
+      .remote-control-grid { grid-template-columns: 1fr; }
       .stage { width: 100%; height: min(64vw, var(--stage-height, 540px)); }
     }
   </style>
@@ -172,6 +179,17 @@
         <div class="actions">
           <button id="connectButton" type="button">連線 MQTT</button>
           <button id="disconnectButton" type="button" class="secondary" disabled>中斷</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>主機端 webcam 控制</h2>
+      <div class="remote-control-grid">
+        <p class="hint">從觀看端遠端要求主機端啟動或停止 webcam。主機端網頁必須保持開啟並已連上相同 MQTT Topic。</p>
+        <div class="actions">
+          <button id="remoteStartButton" type="button" disabled>啟動主機 webcam</button>
+          <button id="remoteStopButton" type="button" class="secondary" disabled>停止主機 webcam</button>
         </div>
       </div>
     </section>
@@ -364,6 +382,8 @@
     const topicInput = document.getElementById("topicInput");
     const connectButton = document.getElementById("connectButton");
     const disconnectButton = document.getElementById("disconnectButton");
+    const remoteStartButton = document.getElementById("remoteStartButton");
+    const remoteStopButton = document.getElementById("remoteStopButton");
     const stage = document.getElementById("stage");
     const stageWidthInput = document.getElementById("stageWidthInput");
     const stageHeightInput = document.getElementById("stageHeightInput");
@@ -418,6 +438,7 @@
     let connectedAt = 0;
     let staleWarningShown = false;
     let watchdogTimer;
+    let mqttRestartTimer;
     let controlPublishTimer;
     let dragState = null;
     let alarmActive = false;
@@ -427,6 +448,8 @@
     let pendingControlRevision = 0;
     let lastAppliedControlRevision = 0;
     let hasViewerControlConfig = false;
+    let pendingFramePayload = null;
+    let pendingFrameAnimation = 0;
 
     const localFenceState = {
       enabled: true,
@@ -931,7 +954,7 @@
       });
     }
 
-    function buildControlPayload() {
+    function buildControlPayload(extraControl = {}) {
       const revision = ++localControlRevisionCounter;
       pendingControlRevision = revision;
       return {
@@ -944,23 +967,32 @@
           fence: serializeFence(localFenceState),
           mqttAlertEnabled: mqttAlertToggle.checked,
           lineAlertEnabled: lineAlertToggle.checked,
-          lineClearEnabled: lineClearToggle.checked
+          lineClearEnabled: lineClearToggle.checked,
+          ...extraControl
         }
       };
     }
 
-    function publishControlState(statusMessage) {
+    function publishControlState(statusMessage, extraControl = {}) {
       if (!mqttClient || !mqttClient.connected) {
+        setStatus("請先連線 MQTT，才能送出主機端控制命令。", "warning");
         return;
       }
       try {
-        mqttClient.publish(getTopic(), JSON.stringify(buildControlPayload()), { qos: 1, retain: false });
+        mqttClient.publish(getTopic(), JSON.stringify(buildControlPayload(extraControl)), { qos: 1, retain: false });
         if (statusMessage) {
           setStatus(statusMessage, "success");
         }
       } catch {
         setStatus("控制設定送出失敗。", "error");
       }
+    }
+
+    function publishWebcamCommand(command) {
+      const label = command === "start" ? "啟動" : "停止";
+      publishControlState(`已送出主機端 webcam ${label}命令，等待主機端回報狀態。`, {
+        webcamCommand: command
+      });
     }
 
     function scheduleControlPublish() {
@@ -992,6 +1024,22 @@
       const seconds = Math.max(1, Math.round(elapsedMs / 1000));
       mqttStateText.textContent = "影像停止";
       setStatus(`影像已停止 ${seconds} 秒，主機端可能離線或沒有持續發布 MQTT 影像。`, "warning");
+    }
+
+    function queueLatestFrameImage(image) {
+      pendingFramePayload = image;
+      if (pendingFrameAnimation) {
+        return;
+      }
+      pendingFrameAnimation = window.requestAnimationFrame(() => {
+        pendingFrameAnimation = 0;
+        const latestImage = pendingFramePayload;
+        pendingFramePayload = null;
+        if (!latestImage || !latestImage.base64) {
+          return;
+        }
+        frame.src = `data:${latestImage.mime || "image/jpeg"};base64,${latestImage.base64}`;
+      });
     }
 
     function applyFramePayload(payload) {
@@ -1076,12 +1124,17 @@
       setStatus(message, active && !payload.status?.cameraFault ? "success" : "warning");
 
       if (!active || !image.base64) {
+        pendingFramePayload = null;
+        if (pendingFrameAnimation) {
+          window.cancelAnimationFrame(pendingFrameAnimation);
+          pendingFrameAnimation = 0;
+        }
         frame.removeAttribute("src");
         clearOverlay();
         drawFence(image.width || 640, image.height || 360, displayFence);
         return;
       }
-      frame.src = `data:${image.mime || "image/jpeg"};base64,${image.base64}`;
+      queueLatestFrameImage(image);
       return true;
     }
 
@@ -1140,6 +1193,10 @@
         return;
       }
       persistConfig();
+      if (mqttRestartTimer) {
+        clearTimeout(mqttRestartTimer);
+        mqttRestartTimer = undefined;
+      }
       if (mqttClient) {
         mqttClient.end(true);
       }
@@ -1150,17 +1207,23 @@
       mqttStateText.textContent = "連線中";
       topicStateText.textContent = topic;
       setStatus("正在連線到 MQTT broker...", "info");
-      mqttClient = mqtt.connect(getBrokerUrl(), {
+      const client = mqtt.connect(getBrokerUrl(), {
         clean: true,
         keepalive: 30,
         connectTimeout: 10000,
         reconnectPeriod: 3000
       });
+      mqttClient = client;
 
-      mqttClient.on("connect", () => {
+      client.on("connect", () => {
+        if (client !== mqttClient) {
+          return;
+        }
         mqttStateText.textContent = "已連線";
         connectButton.disabled = true;
         disconnectButton.disabled = false;
+        remoteStartButton.disabled = false;
+        remoteStopButton.disabled = false;
         brokerInput.disabled = true;
         portInput.disabled = true;
         topicInput.disabled = true;
@@ -1171,7 +1234,10 @@
         if (hasViewerControlConfig) {
           publishControlState("遠端控制設定已同步到主機端。");
         }
-        mqttClient.subscribe(topic, { qos: 1 }, (error) => {
+        client.subscribe(topic, { qos: 1 }, (error) => {
+          if (client !== mqttClient) {
+            return;
+          }
           if (error) {
             mqttStateText.textContent = "訂閱失敗";
             setStatus("MQTT Topic 訂閱失敗。", "error");
@@ -1181,7 +1247,10 @@
         });
       });
 
-      mqttClient.on("message", (_topic, message) => {
+      client.on("message", (_topic, message) => {
+        if (client !== mqttClient) {
+          return;
+        }
         let parsed;
         try {
           parsed = JSON.parse(message.toString());
@@ -1214,15 +1283,23 @@
         }
       });
 
-      mqttClient.on("reconnect", () => {
+      client.on("reconnect", () => {
+        if (client !== mqttClient) {
+          return;
+        }
         mqttStateText.textContent = "重新連線中";
         setStatus("MQTT 斷線，正在自動重連...", "warning");
       });
 
-      mqttClient.on("close", () => {
+      client.on("close", () => {
+        if (client !== mqttClient) {
+          return;
+        }
         mqttStateText.textContent = "未連線";
         connectButton.disabled = false;
         disconnectButton.disabled = true;
+        remoteStartButton.disabled = true;
+        remoteStopButton.disabled = true;
         brokerInput.disabled = false;
         portInput.disabled = false;
         topicInput.disabled = false;
@@ -1231,7 +1308,10 @@
         }
       });
 
-      mqttClient.on("error", (error) => {
+      client.on("error", (error) => {
+        if (client !== mqttClient) {
+          return;
+        }
         mqttStateText.textContent = "錯誤";
         const reason = error && error.message ? error.message : "unknown";
         setStatus(`MQTT 錯誤：${reason}`, "error");
@@ -1240,6 +1320,10 @@
 
     function disconnectMqtt() {
       mqttManualDisconnect = true;
+      if (mqttRestartTimer) {
+        clearTimeout(mqttRestartTimer);
+        mqttRestartTimer = undefined;
+      }
       if (mqttClient) {
         mqttClient.end(true);
         mqttClient = undefined;
@@ -1247,10 +1331,29 @@
       mqttStateText.textContent = "未連線";
       connectButton.disabled = false;
       disconnectButton.disabled = true;
+      remoteStartButton.disabled = true;
+      remoteStopButton.disabled = true;
       brokerInput.disabled = false;
       portInput.disabled = false;
       topicInput.disabled = false;
       setStatus("MQTT 已手動中斷。");
+    }
+
+    function restartMqttConnection() {
+      if (mqttManualDisconnect || mqttRestartTimer) {
+        return;
+      }
+      const staleClient = mqttClient;
+      mqttClient = undefined;
+      if (staleClient) {
+        staleClient.end(true);
+      }
+      mqttRestartTimer = window.setTimeout(() => {
+        mqttRestartTimer = undefined;
+        if (!mqttManualDisconnect) {
+          connectMqtt();
+        }
+      }, 500);
     }
 
     function startWatchdog() {
@@ -1283,7 +1386,7 @@
         setStatus("長時間沒有收到新畫面，正在重新連線 MQTT...", "warning");
         lastMessageAt = Date.now();
         staleWarningShown = false;
-        mqttClient.end(true);
+        restartMqttConnection();
       }, 5000);
     }
 
@@ -1452,6 +1555,8 @@
     });
     connectButton.addEventListener("click", connectMqtt);
     disconnectButton.addEventListener("click", disconnectMqtt);
+    remoteStartButton.addEventListener("click", () => publishWebcamCommand("start"));
+    remoteStopButton.addEventListener("click", () => publishWebcamCommand("stop"));
 
     overlay.addEventListener("pointerdown", (event) => {
       if (!editFenceToggle.checked) {
