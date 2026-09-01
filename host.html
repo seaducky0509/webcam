@@ -744,6 +744,7 @@
     let alarmActive = false;
     let alarmBeepTimer;
     let lastAlarmPublishAt = 0;
+    let lastImmediateLineNotifyAt = 0;
     let dragState = null;
     let controlPublishTimer;
     let suppressControlEcho = false;
@@ -2206,6 +2207,42 @@
       }
     }
 
+    function normalizeItemsForFence(items, fence) {
+      return (items || []).map((item) => ({
+        ...item,
+        insideFence: isPointInsideFence(
+          item.center || { x: (item.bbox?.[0] || 0) + (item.bbox?.[2] || 0) / 2, y: (item.bbox?.[1] || 0) + (item.bbox?.[3] || 0) / 2 },
+          fence
+        )
+      }));
+    }
+
+    function notifyCurrentLineAlarm(reason = "LINE 通知已啟用") {
+      if (mode !== "host" || !lineAlertToggle.checked) {
+        return;
+      }
+      if (!latestHostItems.length) {
+        updateLineStatus("LINE 已啟用，目前尚未偵測到符合條件的物件");
+        return;
+      }
+      const now = Date.now();
+      if (now - lastImmediateLineNotifyAt < 3000) {
+        return;
+      }
+      const fence = normalizeFenceState(localFenceState);
+      const items = normalizeItemsForFence(latestHostItems, fence);
+      const insideCount = items.filter((item) => item.insideFence).length;
+      if (insideCount <= 0) {
+        updateLineStatus("LINE 已啟用，目前圍籬內沒有目標");
+        return;
+      }
+      const message = `${reason}，電子圍籬內目前有 ${insideCount} 個目標。`;
+      const snapshot = captureLineSnapshotBase64(items, fence);
+      lastImmediateLineNotifyAt = now;
+      updateAlarmState(true, message);
+      enqueueLineNotify(buildLineEventPayload("enter", insideCount, items, message, snapshot));
+    }
+
     function applyControlPayload(payload) {
       if (typeof payload.revision === "number") {
         lastAppliedControlRevision = payload.revision;
@@ -2230,9 +2267,13 @@
         mqttAlertToggle.checked = control.mqttAlertEnabled;
       }
       if (typeof control.lineAlertEnabled === "boolean") {
+        const wasLineAlertEnabled = lineAlertToggle.checked;
         lineAlertToggle.checked = control.lineAlertEnabled;
         saveLineConfig();
         updateLineStatus(lineAlertToggle.checked ? (lineWebhookUrlInput.value.trim() ? "待命中" : "請填入 GAS Web App URL") : "未啟用");
+        if (!wasLineAlertEnabled && lineAlertToggle.checked) {
+          notifyCurrentLineAlarm("遠端已開啟 LINE 通知");
+        }
       }
       if (typeof control.lineClearEnabled === "boolean") {
         lineClearToggle.checked = control.lineClearEnabled;
@@ -3033,8 +3074,12 @@
     mqttAlertToggle.addEventListener("change", scheduleControlPublish);
     [lineAlertToggle, lineClearToggle].forEach((input) => {
       input.addEventListener("change", () => {
+        const lineAlertTurnedOn = input === lineAlertToggle && lineAlertToggle.checked;
         saveLineConfig();
         updateLineStatus(lineAlertToggle.checked ? (lineWebhookUrlInput.value.trim() ? "待命中" : "請填入 GAS Web App URL") : "未啟用");
+        if (lineAlertTurnedOn) {
+          notifyCurrentLineAlarm("主機端已開啟 LINE 通知");
+        }
       });
     });
     [lineWebhookUrlInput, lineSecretInput].forEach((input) => {
