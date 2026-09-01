@@ -352,7 +352,11 @@
       topic: "mqttViewer.topic",
       stageWidth: "mqttViewer.stageWidth",
       stageHeight: "mqttViewer.stageHeight",
-      objectFit: "mqttViewer.objectFit"
+      objectFit: "mqttViewer.objectFit",
+      selectedClasses: "mqttViewer.selectedClasses",
+      mqttAlert: "mqttViewer.mqttAlert",
+      lineAlert: "mqttViewer.lineAlert",
+      lineClear: "mqttViewer.lineClear"
     };
 
     const brokerInput = document.getElementById("brokerInput");
@@ -542,6 +546,41 @@
       localStorage.setItem(STORE_KEYS.objectFit, objectFitSelect.value);
     }
 
+    function loadViewerControlConfig() {
+      try {
+        const storedClasses = JSON.parse(localStorage.getItem(STORE_KEYS.selectedClasses) || "null");
+        if (Array.isArray(storedClasses)) {
+          const nextClasses = storedClasses.filter((name) => classNames.includes(name));
+          selectedClasses = new Set(nextClasses);
+        }
+        const storedMqttAlert = localStorage.getItem(STORE_KEYS.mqttAlert);
+        const storedLineAlert = localStorage.getItem(STORE_KEYS.lineAlert);
+        const storedLineClear = localStorage.getItem(STORE_KEYS.lineClear);
+        if (storedMqttAlert !== null) {
+          mqttAlertToggle.checked = storedMqttAlert === "true";
+        }
+        if (storedLineAlert !== null) {
+          lineAlertToggle.checked = storedLineAlert === "true";
+        }
+        if (storedLineClear !== null) {
+          lineClearToggle.checked = storedLineClear === "true";
+        }
+      } catch {
+        setStatus("觀看端控制設定讀取失敗，已使用預設值。", "warning");
+      }
+    }
+
+    function saveViewerControlConfig() {
+      try {
+        localStorage.setItem(STORE_KEYS.selectedClasses, JSON.stringify(classNames.filter((name) => selectedClasses.has(name))));
+        localStorage.setItem(STORE_KEYS.mqttAlert, String(mqttAlertToggle.checked));
+        localStorage.setItem(STORE_KEYS.lineAlert, String(lineAlertToggle.checked));
+        localStorage.setItem(STORE_KEYS.lineClear, String(lineClearToggle.checked));
+      } catch {
+        setStatus("觀看端控制設定無法儲存。", "warning");
+      }
+    }
+
     function getTopic() {
       return topicInput.value.trim();
     }
@@ -594,6 +633,7 @@
             selectedClasses.delete(className);
           }
           updateSelectedSummary();
+          saveViewerControlConfig();
           scheduleControlPublish();
         });
         const text = document.createElement("span");
@@ -1120,6 +1160,7 @@
         lastMessageAt = 0;
         staleWarningShown = false;
         setStatus(`MQTT 已連線：${topic}`, "success");
+        publishControlState("遠端控制設定已同步到主機端。");
         mqttClient.subscribe(topic, { qos: 1 }, (error) => {
           if (error) {
             mqttStateText.textContent = "訂閱失敗";
@@ -1326,12 +1367,14 @@
     selectAllButton.addEventListener("click", () => {
       selectedClasses = new Set(classNames);
       renderClassPicker();
+      saveViewerControlConfig();
       scheduleControlPublish();
     });
 
     clearAllButton.addEventListener("click", () => {
       selectedClasses = new Set();
       renderClassPicker();
+      saveViewerControlConfig();
       scheduleControlPublish();
     });
 
@@ -1392,7 +1435,10 @@
       }
     });
     [mqttAlertToggle, lineAlertToggle, lineClearToggle].forEach((input) => {
-      input.addEventListener("change", scheduleControlPublish);
+      input.addEventListener("change", () => {
+        saveViewerControlConfig();
+        scheduleControlPublish();
+      });
     });
     connectButton.addEventListener("click", connectMqtt);
     disconnectButton.addEventListener("click", disconnectMqtt);
@@ -1432,6 +1478,7 @@
       }
     });
 
+    loadViewerControlConfig();
     renderClassPicker();
     syncFenceControlsFromState(localFenceState);
     applyStageSize();
