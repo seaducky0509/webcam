@@ -2140,19 +2140,6 @@
       }
     }
 
-    function notifyCurrentLineAlarm(message = "LINE 通知已開啟，電子圍籬內目前有目標。") {
-      if (!lineAlertToggle.checked || !alarmActive) {
-        return;
-      }
-      const insideItems = latestHostItems.filter((item) => item.insideFence);
-      if (!insideItems.length) {
-        return;
-      }
-      const fence = normalizeFenceState(localFenceState);
-      const snapshot = captureLineSnapshotBase64(latestHostItems, fence);
-      enqueueLineNotify(buildLineEventPayload("enter", insideItems.length, latestHostItems, message, snapshot));
-    }
-
     function applyControlPayload(payload) {
       if (typeof payload.revision === "number") {
         lastAppliedControlRevision = payload.revision;
@@ -2177,13 +2164,9 @@
         mqttAlertToggle.checked = control.mqttAlertEnabled;
       }
       if (typeof control.lineAlertEnabled === "boolean") {
-        const wasLineEnabled = lineAlertToggle.checked;
         lineAlertToggle.checked = control.lineAlertEnabled;
         saveLineConfig();
         updateLineStatus(lineAlertToggle.checked ? (lineWebhookUrlInput.value.trim() ? "待命中" : "請填入 GAS Web App URL") : "未啟用");
-        if (!wasLineEnabled && lineAlertToggle.checked) {
-          notifyCurrentLineAlarm();
-        }
       }
       if (typeof control.lineClearEnabled === "boolean") {
         lineClearToggle.checked = control.lineClearEnabled;
@@ -2902,9 +2885,6 @@
       input.addEventListener("change", () => {
         saveLineConfig();
         updateLineStatus(lineAlertToggle.checked ? (lineWebhookUrlInput.value.trim() ? "待命中" : "請填入 GAS Web App URL") : "未啟用");
-        if (input === lineAlertToggle && lineAlertToggle.checked) {
-          notifyCurrentLineAlarm();
-        }
       });
     });
     [lineWebhookUrlInput, lineSecretInput].forEach((input) => {
