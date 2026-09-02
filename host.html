@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2 id="modeTitle">MQTT 主機端 / 攝影機發送端</h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260902.2</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -618,11 +618,12 @@
     const HOST_SYNC_INTERVAL_MS = 240;
     const MQTT_FRAME_BUFFER_LIMIT_BYTES = 320000;
     const ALARM_REPEAT_INTERVAL_MS = 5000;
+    const DETECTION_RESULT_TTL_MS = 1500;
     const VIEWER_MESSAGE_TIMEOUT_MS = 20000;
     const HOST_RETAIN_CLEAR_DELAY_MS = 300;
     const STALE_FRAME_WARNING_MS = 12000;
     const RETAINED_FRAME_MAX_AGE_MS = 10000;
-    const INFERENCE_TIMEOUT_MS = 8000;
+    const INFERENCE_TIMEOUT_MS = 4000;
     const INFERENCE_ERROR_LIMIT = 3;
     const DEFAULT_TOPIC = "vision/seaducky0509/webcam/live01";
     const LEGACY_TOPIC = "vision/demo/cam01";
@@ -721,6 +722,7 @@
     let model;
     let stream;
     let detectionLoopTimer;
+    let framePublishLoopTimer;
     let mqttClient;
     let publishInFlight = false;
     let lastInferenceAt = 0;
@@ -728,6 +730,7 @@
     let hostFrameId = 0;
     let detectionRunning = false;
     let latestHostItems = [];
+    let latestDetectionAt = 0;
     let selectedClasses = new Set(classNames);
     let latestViewerItems = [];
     let latestViewerImageSize = { width: 0, height: 0 };
@@ -1455,6 +1458,12 @@
         clearTimeout(detectionLoopTimer);
         detectionLoopTimer = undefined;
       }
+      if (framePublishLoopTimer) {
+        clearTimeout(framePublishLoopTimer);
+        framePublishLoopTimer = undefined;
+      }
+      latestHostItems = [];
+      latestDetectionAt = 0;
       if (stream) {
         for (const track of stream.getTracks()) {
           track.stop();
@@ -2501,8 +2510,8 @@
           }, HOST_RETAIN_CLEAR_DELAY_MS);
         }
         const subscriptions = mode === "host"
-          ? [getControlTopic(), topic]
-          : [getFrameTopic(), getControlTopic(), getAlarmTopic(), topic];
+          ? [getControlTopic()]
+          : [getFrameTopic(), getControlTopic(), getAlarmTopic()];
         client.subscribe(subscriptions, { qos: 1 }, (error) => {
           if (client !== mqttClient) {
             return;
@@ -2612,6 +2621,41 @@
         return;
       }
       detectionLoopTimer = window.setTimeout(runDetectionLoop, delayMs);
+    }
+
+    function scheduleNextFramePublish(delayMs = HOST_SYNC_INTERVAL_MS) {
+      if (!detectionRunning) {
+        return;
+      }
+      if (framePublishLoopTimer) {
+        clearTimeout(framePublishLoopTimer);
+      }
+      framePublishLoopTimer = window.setTimeout(runFramePublishLoop, delayMs);
+    }
+
+    async function runFramePublishLoop() {
+      if (!detectionRunning) {
+        return;
+      }
+      const startedAt = performance.now();
+      const fence = normalizeFenceState(localFenceState);
+      const detectionIsFresh = latestDetectionAt && Date.now() - latestDetectionAt <= DETECTION_RESULT_TTL_MS;
+      let frameItems = detectionIsFresh ? latestHostItems : [];
+
+      if (!detectionIsFresh && latestHostItems.length) {
+        latestHostItems = [];
+        frameItems = [];
+        drawItems([], video.videoWidth || 1, video.videoHeight || 1, fence);
+        setDetections([]);
+        inferenceStateText.textContent = "辨識結果逾時，已清除舊標記";
+      }
+
+      try {
+        await pushCurrentFrame(frameItems, fence);
+      } finally {
+        const elapsed = performance.now() - startedAt;
+        scheduleNextFramePublish(Math.max(30, HOST_SYNC_INTERVAL_MS - elapsed));
+      }
     }
 
     function getMqttBufferedAmount() {
@@ -2737,6 +2781,7 @@
         const fence = normalizeFenceState(localFenceState);
         const items = filtered.map((prediction) => toDetectionItem(prediction, video.videoWidth, video.videoHeight, fence));
         latestHostItems = items;
+        latestDetectionAt = Date.now();
         drawItems(items, video.videoWidth, video.videoHeight, fence);
         setDetections(items);
         maybePublishAlarm(items, fence);
@@ -2752,7 +2797,6 @@
         } else {
           inferenceStateText.textContent = "未找到目標";
         }
-        await pushCurrentFrame(items, fence);
       } catch (error) {
         consecutiveInferenceErrors += 1;
         const errorName = error?.name || "Error";
@@ -2925,11 +2969,14 @@
         resizeOverlay(video.videoWidth, video.videoHeight);
         clearOverlay();
         detectionRunning = true;
+        latestHostItems = [];
+        latestDetectionAt = 0;
         consecutiveInferenceErrors = 0;
         lastSuccessfulInferenceAt = Date.now();
         inferenceRecoveryInFlight = false;
         updateButtons(true);
         setStatus(automatic ? "webcam 已自動重啟，正在確認現場畫面。" : "webcam 已啟動，影像辨識與 MQTT 發送中。", "success");
+        runFramePublishLoop();
         runDetectionLoop();
         await refreshDiagnostics();
       } catch (error) {
