@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260902.3</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260902.4</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -616,6 +616,10 @@
     const STREAM_MAX_HEIGHT = 480;
     const STREAM_JPEG_QUALITY = 0.42;
     const HOST_SYNC_INTERVAL_MS = 240;
+    const INFERENCE_MAX_WIDTH = 480;
+    const INFERENCE_MAX_HEIGHT = 270;
+    const INFERENCE_INTERVAL_MS = 350;
+    const JPEG_ENCODE_TIMEOUT_MS = 1500;
     const MQTT_FRAME_BUFFER_LIMIT_BYTES = 320000;
     const ALARM_REPEAT_INTERVAL_MS = 5000;
     const DETECTION_RESULT_TTL_MS = 1500;
@@ -630,7 +634,6 @@
     const WEBCAM_START_TIMEOUT_MS = 8000;
     const CAMERA_DARK_LUMA_THRESHOLD = 6;
     const CAMERA_DARK_FRAME_LIMIT = 8;
-    const CAMERA_FROZEN_FRAME_LIMIT = 16;
     const CAMERA_RESTART_COOLDOWN_MS = 15000;
     const CAMERA_AUTO_START_KEY = "mqtt-vision-camera-auto-start-v1";
     const CAMERA_RELOAD_ATTEMPTS_KEY = "mqtt-vision-camera-reload-attempts-v1";
@@ -758,8 +761,7 @@
     let lineNotifyInFlight = false;
     let lineNotifyQueue = [];
     let cameraDarkFrameCount = 0;
-    let cameraFrozenFrameCount = 0;
-    let lastCameraFrameSignature = "";
+    let lastCameraHealthCheckAt = 0;
     let currentCameraFault = "";
     let cameraRestartInFlight = false;
     let lastCameraRestartAt = 0;
@@ -778,6 +780,8 @@
 
     const compositeCanvas = document.createElement("canvas");
     const compositeContext = compositeCanvas.getContext("2d");
+    const inferenceCanvas = document.createElement("canvas");
+    const inferenceContext = inferenceCanvas.getContext("2d", { alpha: false });
     let lastLineSnapshotBase64 = "";
     let lastLineSnapshotAt = 0;
 
@@ -1378,8 +1382,7 @@
 
     function resetCameraHealth() {
       cameraDarkFrameCount = 0;
-      cameraFrozenFrameCount = 0;
-      lastCameraFrameSignature = "";
+      lastCameraHealthCheckAt = 0;
       currentCameraFault = "";
     }
 
@@ -1460,12 +1463,16 @@
     }
 
     function inspectCameraFrame(context, width, height) {
+      const now = Date.now();
+      if (now - lastCameraHealthCheckAt < 2000) {
+        return "";
+      }
+      lastCameraHealthCheckAt = now;
       const pixels = context.getImageData(0, 0, width, height).data;
       const stepX = Math.max(1, Math.floor(width / 24));
       const stepY = Math.max(1, Math.floor(height / 18));
       let lumaTotal = 0;
       let sampleCount = 0;
-      let signature = "";
 
       for (let y = Math.floor(stepY / 2); y < height; y += stepY) {
         for (let x = Math.floor(stepX / 2); x < width; x += stepX) {
@@ -1473,20 +1480,14 @@
           const luma = Math.round(pixels[offset] * 0.2126 + pixels[offset + 1] * 0.7152 + pixels[offset + 2] * 0.0722);
           lumaTotal += luma;
           sampleCount += 1;
-          signature += luma.toString(16).padStart(2, "0");
         }
       }
 
       const averageLuma = sampleCount ? lumaTotal / sampleCount : 0;
       cameraDarkFrameCount = averageLuma < CAMERA_DARK_LUMA_THRESHOLD ? cameraDarkFrameCount + 1 : 0;
-      cameraFrozenFrameCount = signature && signature === lastCameraFrameSignature ? cameraFrozenFrameCount + 1 : 0;
-      lastCameraFrameSignature = signature;
 
       if (cameraDarkFrameCount >= CAMERA_DARK_FRAME_LIMIT) {
         return `攝影機畫面持續過暗或全黑（亮度 ${averageLuma.toFixed(1)}）`;
-      }
-      if (cameraFrozenFrameCount >= CAMERA_FROZEN_FRAME_LIMIT) {
-        return "攝影機畫面已凍結，沒有更新";
       }
       return "";
     }
@@ -2718,14 +2719,24 @@
 
     function canvasToJpegBase64(canvas, quality) {
       return new Promise((resolve) => {
+        let settled = false;
+        const finish = (value) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          window.clearTimeout(timeoutId);
+          resolve(value);
+        };
+        const timeoutId = window.setTimeout(() => finish(""), JPEG_ENCODE_TIMEOUT_MS);
         canvas.toBlob((blob) => {
           if (!blob) {
-            resolve("");
+            finish("");
             return;
           }
           const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result || "").split(",")[1] || "");
-          reader.onerror = () => resolve("");
+          reader.onload = () => finish(String(reader.result || "").split(",")[1] || "");
+          reader.onerror = () => finish("");
           reader.readAsDataURL(blob);
         }, "image/jpeg", quality);
       });
@@ -2812,7 +2823,7 @@
       }
 
       const now = performance.now();
-      if (now - lastInferenceAt < 140) {
+      if (now - lastInferenceAt < INFERENCE_INTERVAL_MS) {
         scheduleNextDetection(30);
         return;
       }
@@ -2821,12 +2832,22 @@
       inferenceStateText.textContent = "辨識中";
 
       try {
-        const predictions = await detectWithTimeout(video);
+        const sourceWidth = video.videoWidth;
+        const sourceHeight = video.videoHeight;
+        const inferenceScale = Math.min(1, INFERENCE_MAX_WIDTH / sourceWidth, INFERENCE_MAX_HEIGHT / sourceHeight);
+        const inferenceWidth = Math.max(1, Math.round(sourceWidth * inferenceScale));
+        const inferenceHeight = Math.max(1, Math.round(sourceHeight * inferenceScale));
+        if (inferenceCanvas.width !== inferenceWidth || inferenceCanvas.height !== inferenceHeight) {
+          inferenceCanvas.width = inferenceWidth;
+          inferenceCanvas.height = inferenceHeight;
+        }
+        inferenceContext.drawImage(video, 0, 0, inferenceWidth, inferenceHeight);
+        const predictions = await detectWithTimeout(inferenceCanvas);
         lastSuccessfulInferenceAt = Date.now();
         clearInferenceRecovery();
         const filtered = predictions.filter((prediction) => prediction.score >= 0.55 && selectedClasses.has(prediction.class));
         const fence = normalizeFenceState(localFenceState);
-        const items = filtered.map((prediction) => toDetectionItem(prediction, video.videoWidth, video.videoHeight, fence));
+        const items = filtered.map((prediction) => toDetectionItem(prediction, inferenceWidth, inferenceHeight, fence));
         latestHostItems = items;
         latestDetectionAt = Date.now();
         drawItems(items, video.videoWidth, video.videoHeight, fence);
