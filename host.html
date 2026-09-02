@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260902.2</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260902.3</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -753,8 +753,8 @@
     let suppressControlEcho = false;
     let audioContext;
     let localControlRevisionCounter = 0;
-    let pendingControlRevision = 0;
-    let lastAppliedControlRevision = 0;
+    let hostStateVersion = 0;
+    let lastAckCommandId = "";
     let lineNotifyInFlight = false;
     let lineNotifyQueue = [];
     let cameraDarkFrameCount = 0;
@@ -770,6 +770,7 @@
     let inferenceRecoveryInFlight = false;
 
     const LINE_CONFIG_STORAGE_KEY = "mqtt-vision-line-config-v1";
+    const HOST_CONTROL_STORAGE_KEY = "mqtt-vision-host-control-v1";
     const CAMERA_STORAGE_KEY = "mqtt-vision-camera-device-v1";
     const SOURCE_ID_STORAGE_KEY = "mqtt-vision-host-source-id-v1";
     const INFERENCE_RELOAD_ATTEMPTS_KEY = "mqtt-vision-inference-reload-attempts-v1";
@@ -862,6 +863,49 @@
         }));
       } catch {
         updateLineStatus("LINE 設定無法儲存");
+      }
+    }
+
+    function loadHostControlConfig() {
+      if (mode !== "host") {
+        return;
+      }
+      try {
+        const raw = localStorage.getItem(HOST_CONTROL_STORAGE_KEY);
+        if (!raw) {
+          return;
+        }
+        const config = JSON.parse(raw);
+        if (Array.isArray(config.selectedClasses)) {
+          selectedClasses = new Set(config.selectedClasses.filter((name) => classNames.includes(name)));
+        }
+        if (config.fence) {
+          const fence = normalizeFenceState(config.fence);
+          localFenceState.enabled = fence.enabled;
+          localFenceState.shape = fence.shape;
+          localFenceState.rect = { ...fence.rect };
+          localFenceState.points = fence.points.map((point) => ({ ...point }));
+        }
+        if (typeof config.mqttAlertEnabled === "boolean") {
+          mqttAlertToggle.checked = config.mqttAlertEnabled;
+        }
+      } catch {
+        setStatus("主機控制設定讀取失敗，已使用預設值。", "warning");
+      }
+    }
+
+    function saveHostControlConfig() {
+      if (mode !== "host") {
+        return;
+      }
+      try {
+        localStorage.setItem(HOST_CONTROL_STORAGE_KEY, JSON.stringify({
+          selectedClasses: classNames.filter((name) => selectedClasses.has(name)),
+          fence: serializeFence(localFenceState),
+          mqttAlertEnabled: mqttAlertToggle.checked
+        }));
+      } catch {
+        setStatus("主機控制設定無法儲存。", "warning");
       }
     }
 
@@ -1050,14 +1094,12 @@
     }
 
     function scheduleControlPublish() {
-      if (mode !== "viewer") {
-        return;
-      }
+      saveHostControlConfig();
       if (controlPublishTimer) {
         clearTimeout(controlPublishTimer);
       }
       controlPublishTimer = window.setTimeout(() => {
-        publishControlState("遠端控制設定已更新。");
+        publishControlState(mode === "host" ? "主機設定已同步到觀看端。" : "遠端控制設定已更新。");
       }, 120);
     }
 
@@ -1977,12 +2019,14 @@
 
     function buildControlPayload() {
       const revision = ++localControlRevisionCounter;
-      pendingControlRevision = revision;
+      hostStateVersion += 1;
       return {
-        type: "control",
+        type: "state",
         ts: new Date().toISOString(),
         source: getDeviceName(),
         revision,
+        stateVersion: hostStateVersion,
+        ackCommandId: lastAckCommandId,
         control: {
           selectedClasses: classNames.filter((name) => selectedClasses.has(name)),
           fence: serializeFence(localFenceState),
@@ -1998,7 +2042,7 @@
         return;
       }
       try {
-        mqttClient.publish(getControlTopic(), JSON.stringify(buildControlPayload()), { qos: 1, retain: false });
+        mqttClient.publish(getControlTopic(), JSON.stringify(buildControlPayload()), { qos: 1, retain: true });
         if (statusMessage) {
           setStatus(statusMessage, "success");
         }
@@ -2036,8 +2080,8 @@
           lineClearEnabled: lineClearToggle.checked
         },
         controlState: {
-          revision: lastAppliedControlRevision,
-          pendingRevision: pendingControlRevision || 0
+          version: hostStateVersion,
+          ackCommandId: lastAckCommandId
         },
         view: {
           width: Number(stageWidthInput.value) || 960,
@@ -2084,8 +2128,8 @@
           lineClearEnabled: lineClearToggle.checked
         },
         controlState: {
-          revision: lastAppliedControlRevision,
-          pendingRevision: pendingControlRevision || 0
+          version: hostStateVersion,
+          ackCommandId: lastAckCommandId
         },
         view: {
           width: Number(stageWidthInput.value) || 960,
@@ -2265,12 +2309,8 @@
     }
 
     function applyControlPayload(payload) {
-      if (typeof payload.revision === "number") {
-        lastAppliedControlRevision = payload.revision;
-        if (payload.revision >= pendingControlRevision) {
-          pendingControlRevision = 0;
-        }
-      }
+      lastAckCommandId = payload.commandId || `${payload.source || "viewer"}:${payload.revision || Date.now()}`;
+      hostStateVersion += 1;
       const control = payload.control || {};
       if (Array.isArray(control.selectedClasses)) {
         selectedClasses = new Set(control.selectedClasses.filter((name) => classNames.includes(name)));
@@ -2314,6 +2354,8 @@
         }, 0);
       }
       redrawCurrentOverlay();
+      saveHostControlConfig();
+      publishControlState("");
       setStatus("已套用遠端控制設定。", "success");
     }
 
@@ -2402,23 +2444,20 @@
         lineClearToggle.checked = payload.alerts.lineClearEnabled;
       }
       const items = normalizeIncomingItems(payload.detect?.items || [], image.width, image.height, incomingFence);
-      const incomingRevision = Number(payload.controlState?.revision || 0);
+      const incomingStateVersion = Number(payload.controlState?.version || 0);
       remoteFenceState = incomingFence;
       if (payload.alerts && typeof payload.alerts.mqttEnabled === "boolean") {
         mqttAlertToggle.checked = payload.alerts.mqttEnabled;
       }
-      if (incomingRevision > lastAppliedControlRevision) {
-        lastAppliedControlRevision = incomingRevision;
+      if (incomingStateVersion > hostStateVersion) {
+        hostStateVersion = incomingStateVersion;
       }
-      const canApplyRemoteControl = !pendingControlRevision || incomingRevision >= pendingControlRevision;
+      const canApplyRemoteControl = true;
       const displayFence = canApplyRemoteControl ? incomingFence : localFenceState;
       const displayItems = canApplyRemoteControl
         ? items
         : normalizeIncomingItems(payload.detect?.items || [], image.width, image.height, localFenceState);
       if (canApplyRemoteControl) {
-        if (pendingControlRevision && incomingRevision >= pendingControlRevision) {
-          pendingControlRevision = 0;
-        }
         selectedClasses = new Set(Array.isArray(payload.detect?.selectedClasses) ? payload.detect.selectedClasses : classNames);
         renderClassPicker();
         syncFenceControlsFromState(incomingFence);
@@ -2506,6 +2545,7 @@
             if (mqttClient && mqttClient.connected) {
               mqttClient.publish(getFrameTopic(), "", { qos: 1, retain: true });
               mqttClient.publish(topic, "", { qos: 1, retain: true });
+              publishControlState("");
             }
           }, HOST_RETAIN_CLEAR_DELAY_MS);
         }
@@ -2538,6 +2578,13 @@
 
         if (parsed && typeof parsed === "object" && parsed.type === "control") {
           if (parsed.source !== getDeviceName()) {
+            applyControlPayload(parsed);
+          }
+          return;
+        }
+
+        if (parsed && typeof parsed === "object" && parsed.type === "state") {
+          if (mode === "viewer" && parsed.source !== getDeviceName()) {
             applyControlPayload(parsed);
           }
           return;
@@ -3224,6 +3271,7 @@
     });
 
     loadLineConfig();
+    loadHostControlConfig();
     applyMode();
     renderClassPicker();
     applyStageSize();

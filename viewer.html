@@ -166,7 +166,7 @@
 <body>
   <main>
     <section class="panel">
-      <h1>MQTT 觀看端 <span class="version-badge">版本 20260902.2</span></h1>
+      <h1>MQTT 觀看端 <span class="version-badge">版本 20260902.3</span></h1>
       <p>外網監控端可直接透過 MQTT 接收本機影像、辨識結果與電子圍籬資訊，也能把圍籬與辨識類別設定回傳到主機端。</p>
     </section>
 
@@ -327,6 +327,10 @@
           <dd id="modelState">unknown</dd>
           <dt>來源裝置</dt>
           <dd id="deviceState">unknown</dd>
+          <dt>接收速率</dt>
+          <dd id="frameRateState">0.0 FPS</dd>
+          <dt>連線診斷</dt>
+          <dd id="connectionDiag">尚未連線</dd>
         </dl>
       </section>
 
@@ -428,6 +432,8 @@
     const updatedAtText = document.getElementById("updatedAt");
     const modelStateText = document.getElementById("modelState");
     const deviceStateText = document.getElementById("deviceState");
+    const frameRateStateText = document.getElementById("frameRateState");
+    const connectionDiagText = document.getElementById("connectionDiag");
     const fenceStateText = document.getElementById("fenceState");
     const insideCountStateText = document.getElementById("insideCountState");
     const alarmMessageStateText = document.getElementById("alarmMessageState");
@@ -453,11 +459,15 @@
     let alarmBeepTimer;
     let audioContext;
     let localControlRevisionCounter = 0;
-    let pendingControlRevision = 0;
-    let lastAppliedControlRevision = 0;
+    let pendingControlCommandId = "";
+    let lastHostStateVersion = 0;
     let hasViewerControlConfig = false;
     let pendingFramePayload = null;
     let pendingFrameAnimation = 0;
+    let reconnectCount = 0;
+    let closeCount = 0;
+    let frameRateWindowStartedAt = performance.now();
+    let frameRateWindowCount = 0;
 
     const localFenceState = {
       enabled: true,
@@ -976,12 +986,14 @@
 
     function buildControlPayload(extraControl = {}) {
       const revision = ++localControlRevisionCounter;
-      pendingControlRevision = revision;
+      const commandId = `${getDeviceName()}:${Date.now()}:${revision}`;
+      pendingControlCommandId = commandId;
       return {
         type: "control",
         ts: new Date().toISOString(),
         source: getDeviceName(),
         revision,
+        commandId,
         control: {
           selectedClasses: classNames.filter((name) => selectedClasses.has(name)),
           fence: serializeFence(localFenceState),
@@ -1062,6 +1074,18 @@
       });
     }
 
+    function recordFrameArrival() {
+      frameRateWindowCount += 1;
+      const now = performance.now();
+      const elapsed = now - frameRateWindowStartedAt;
+      if (elapsed < 2000) {
+        return;
+      }
+      frameRateStateText.textContent = `${(frameRateWindowCount * 1000 / elapsed).toFixed(1)} FPS`;
+      frameRateWindowStartedAt = now;
+      frameRateWindowCount = 0;
+    }
+
     function applyFramePayload(payload) {
       const image = payload.image || {};
       if (!payload.frameId) {
@@ -1096,11 +1120,15 @@
       }
       const incomingFence = normalizeFenceState(payload.fence || localFenceState);
       latestFence = incomingFence;
-      const incomingRevision = Number(payload.controlState?.revision || 0);
-      if (incomingRevision > lastAppliedControlRevision) {
-        lastAppliedControlRevision = incomingRevision;
+      const incomingStateVersion = Number(payload.controlState?.version || 0);
+      const ackCommandId = String(payload.controlState?.ackCommandId || "");
+      if (ackCommandId && ackCommandId === pendingControlCommandId) {
+        pendingControlCommandId = "";
       }
-      const canApplyRemoteControl = !pendingControlRevision || incomingRevision >= pendingControlRevision;
+      if (incomingStateVersion > lastHostStateVersion) {
+        lastHostStateVersion = incomingStateVersion;
+      }
+      const canApplyRemoteControl = !pendingControlCommandId;
       const displayFence = canApplyRemoteControl ? incomingFence : localFenceState;
       if (canApplyRemoteControl) {
         if (payload.alerts && typeof payload.alerts.mqttEnabled === "boolean") {
@@ -1111,9 +1139,6 @@
         }
         if (payload.alerts && typeof payload.alerts.lineClearEnabled === "boolean") {
           lineClearToggle.checked = payload.alerts.lineClearEnabled;
-        }
-        if (pendingControlRevision && incomingRevision >= pendingControlRevision) {
-          pendingControlRevision = 0;
         }
         localFenceState.enabled = incomingFence.enabled;
         localFenceState.shape = incomingFence.shape;
@@ -1155,6 +1180,7 @@
         return;
       }
       queueLatestFrameImage(image);
+      recordFrameArrival();
       return true;
     }
 
@@ -1174,11 +1200,16 @@
       if (payload.source === getDeviceName()) {
         return;
       }
-      if (typeof payload.revision === "number") {
-        lastAppliedControlRevision = payload.revision;
-        if (payload.revision >= pendingControlRevision) {
-          pendingControlRevision = 0;
-        }
+      const incomingStateVersion = Number(payload.stateVersion || 0);
+      const ackCommandId = String(payload.ackCommandId || "");
+      if (ackCommandId && ackCommandId === pendingControlCommandId) {
+        pendingControlCommandId = "";
+      }
+      if (pendingControlCommandId) {
+        return;
+      }
+      if (incomingStateVersion > lastHostStateVersion) {
+        lastHostStateVersion = incomingStateVersion;
       }
       const control = payload.control || {};
       if (Array.isArray(control.selectedClasses)) {
@@ -1250,10 +1281,11 @@
         connectedAt = Date.now();
         lastMessageAt = 0;
         staleWarningShown = false;
+        pendingControlCommandId = "";
+        frameRateWindowStartedAt = performance.now();
+        frameRateWindowCount = 0;
+        connectionDiagText.textContent = `連線成功｜重連 ${reconnectCount} 次｜關閉 ${closeCount} 次`;
         setStatus(`MQTT 已連線：${topic}`, "success");
-        if (hasViewerControlConfig) {
-          publishControlState("遠端控制設定已同步到主機端。");
-        }
         client.subscribe([getFrameTopic(), getControlTopic(), getAlarmTopic()], { qos: 1 }, (error) => {
           if (client !== mqttClient) {
             return;
@@ -1281,8 +1313,11 @@
         if (!payload) {
           return;
         }
-        if (payload.type === "control") {
+        if (payload.type === "state") {
           applyControlPayload(payload);
+          return;
+        }
+        if (payload.type === "control") {
           return;
         }
         if (payload.type === "alarm") {
@@ -1308,6 +1343,8 @@
           return;
         }
         mqttStateText.textContent = "重新連線中";
+        reconnectCount += 1;
+        connectionDiagText.textContent = `重新連線中｜重連 ${reconnectCount} 次｜關閉 ${closeCount} 次`;
         setStatus("MQTT 斷線，正在自動重連...", "warning");
       });
 
@@ -1316,6 +1353,8 @@
           return;
         }
         mqttStateText.textContent = "未連線";
+        closeCount += 1;
+        connectionDiagText.textContent = `連線已關閉｜重連 ${reconnectCount} 次｜關閉 ${closeCount} 次`;
         connectButton.disabled = false;
         disconnectButton.disabled = true;
         remoteStartButton.disabled = true;
@@ -1334,6 +1373,8 @@
         }
         mqttStateText.textContent = "錯誤";
         const reason = error && error.message ? error.message : "unknown";
+        connectionDiagText.textContent = `錯誤：${reason}｜重連 ${reconnectCount} 次｜關閉 ${closeCount} 次`;
+        console.warn("[MQTT viewer error]", reason);
         setStatus(`MQTT 錯誤：${reason}`, "error");
       });
     }
