@@ -359,8 +359,7 @@
       "person", "bicycle", "car", "motorcycle", "bus", "truck", "cat", "dog", "chair", "bottle", "cell phone", "laptop"
     ];
     const params = new URLSearchParams(window.location.search);
-    const STALE_FRAME_WARNING_MS = 5000;
-    const FRAME_RECONNECT_MS = 15000;
+    const STALE_FRAME_WARNING_MS = 12000;
     const RETAINED_FRAME_MAX_AGE_MS = 10000;
     const DEFAULT_TOPIC = "vision/seaducky0509/webcam/live01";
     const LEGACY_TOPIC = "vision/demo/cam01";
@@ -614,6 +613,18 @@
 
     function getTopic() {
       return topicInput.value.trim();
+    }
+
+    function getFrameTopic() {
+      return `${getTopic()}/frame`;
+    }
+
+    function getControlTopic() {
+      return `${getTopic()}/control`;
+    }
+
+    function getAlarmTopic() {
+      return `${getTopic()}/alarm`;
     }
 
     function getBrokerUrl() {
@@ -979,7 +990,7 @@
         return;
       }
       try {
-        mqttClient.publish(getTopic(), JSON.stringify(buildControlPayload(extraControl)), { qos: 1, retain: false });
+        mqttClient.publish(getControlTopic(), JSON.stringify(buildControlPayload(extraControl)), { qos: 1, retain: false });
         if (statusMessage) {
           setStatus(statusMessage, "success");
         }
@@ -1234,7 +1245,7 @@
         if (hasViewerControlConfig) {
           publishControlState("遠端控制設定已同步到主機端。");
         }
-        client.subscribe(topic, { qos: 1 }, (error) => {
+        client.subscribe([getFrameTopic(), getControlTopic(), getAlarmTopic(), topic], { qos: 1 }, (error) => {
           if (client !== mqttClient) {
             return;
           }
@@ -1380,13 +1391,6 @@
           staleWarningShown = true;
           markFrameStale(elapsed);
         }
-        if (elapsed < FRAME_RECONNECT_MS) {
-          return;
-        }
-        setStatus("長時間沒有收到新畫面，正在重新連線 MQTT...", "warning");
-        lastMessageAt = Date.now();
-        staleWarningShown = false;
-        restartMqttConnection();
       }, 5000);
     }
 

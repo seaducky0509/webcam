@@ -616,11 +616,11 @@
     const STREAM_MAX_HEIGHT = 480;
     const STREAM_JPEG_QUALITY = 0.42;
     const HOST_SYNC_INTERVAL_MS = 240;
-    const MQTT_FRAME_BUFFER_LIMIT_BYTES = 900000;
+    const MQTT_FRAME_BUFFER_LIMIT_BYTES = 320000;
+    const ALARM_REPEAT_INTERVAL_MS = 5000;
     const VIEWER_MESSAGE_TIMEOUT_MS = 20000;
     const HOST_RETAIN_CLEAR_DELAY_MS = 300;
-    const STALE_FRAME_WARNING_MS = 5000;
-    const FRAME_RECONNECT_MS = 15000;
+    const STALE_FRAME_WARNING_MS = 12000;
     const RETAINED_FRAME_MAX_AGE_MS = 10000;
     const INFERENCE_TIMEOUT_MS = 8000;
     const INFERENCE_ERROR_LIMIT = 3;
@@ -958,6 +958,18 @@
 
     function getTopic() {
       return topicInput.value.trim();
+    }
+
+    function getFrameTopic() {
+      return `${getTopic()}/frame`;
+    }
+
+    function getControlTopic() {
+      return `${getTopic()}/control`;
+    }
+
+    function getAlarmTopic() {
+      return `${getTopic()}/alarm`;
     }
 
     function getBrokerUrl() {
@@ -1977,7 +1989,7 @@
         return;
       }
       try {
-        mqttClient.publish(getTopic(), JSON.stringify(buildControlPayload()), { qos: 1, retain: false });
+        mqttClient.publish(getControlTopic(), JSON.stringify(buildControlPayload()), { qos: 1, retain: false });
         if (statusMessage) {
           setStatus(statusMessage, "success");
         }
@@ -2177,7 +2189,7 @@
       }
       if (nextActive && mqttAlertToggle.checked && mqttClient && mqttClient.connected) {
         const now = Date.now();
-        if (now - lastAlarmPublishAt >= 500) {
+        if (now - lastAlarmPublishAt >= ALARM_REPEAT_INTERVAL_MS) {
           const payload = {
             type: "alarm",
             ts: new Date().toISOString(),
@@ -2188,7 +2200,7 @@
               message
             }
           };
-          mqttClient.publish(getTopic(), JSON.stringify(payload), { qos: 1, retain: false });
+          mqttClient.publish(getAlarmTopic(), JSON.stringify(payload), { qos: wasActive ? 0 : 1, retain: false });
           lastAlarmPublishAt = now;
         }
       } else if (!nextActive && wasActive && mqttAlertToggle.checked && mqttClient && mqttClient.connected) {
@@ -2202,7 +2214,7 @@
             message
           }
         };
-        mqttClient.publish(getTopic(), JSON.stringify(payload), { qos: 1, retain: false });
+        mqttClient.publish(getAlarmTopic(), JSON.stringify(payload), { qos: 1, retain: false });
         lastAlarmPublishAt = 0;
       }
     }
@@ -2458,7 +2470,7 @@
       };
       if (mode === "host") {
         connectOptions.will = {
-          topic,
+          topic: getFrameTopic(),
           payload: JSON.stringify(buildInactivePayload()),
           qos: 1,
           retain: true
@@ -2483,11 +2495,15 @@
           setStatus(`MQTT 已連線：${topic}。接著可啟動 webcam。`, "success");
           window.setTimeout(() => {
             if (mqttClient && mqttClient.connected) {
+              mqttClient.publish(getFrameTopic(), "", { qos: 1, retain: true });
               mqttClient.publish(topic, "", { qos: 1, retain: true });
             }
           }, HOST_RETAIN_CLEAR_DELAY_MS);
         }
-        client.subscribe(topic, { qos: 1 }, (error) => {
+        const subscriptions = mode === "host"
+          ? [getControlTopic(), topic]
+          : [getFrameTopic(), getControlTopic(), getAlarmTopic(), topic];
+        client.subscribe(subscriptions, { qos: 1 }, (error) => {
           if (client !== mqttClient) {
             return;
           }
@@ -2609,6 +2625,21 @@
       return values.length ? Math.max(...values) : 0;
     }
 
+    function canvasToJpegBase64(canvas, quality) {
+      return new Promise((resolve) => {
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            resolve("");
+            return;
+          }
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || "").split(",")[1] || "");
+          reader.onerror = () => resolve("");
+          reader.readAsDataURL(blob);
+        }, "image/jpeg", quality);
+      });
+    }
+
     async function publishCurrentState(payload) {
       if (!mqttClient || !mqttClient.connected) {
         syncStateText.textContent = "未連線";
@@ -2622,7 +2653,7 @@
       try {
         // Live video favors the newest frame; QoS 0 prevents old JPEG frames from
         // blocking reliable control messages in the broker/client queue.
-        mqttClient.publish(getTopic(), JSON.stringify(payload), { qos: 0, retain: false });
+        mqttClient.publish(getFrameTopic(), JSON.stringify(payload), { qos: 0, retain: false });
         syncStateText.textContent = "已發送";
         publishRunStateText.textContent = detectionRunning ? "正在發布影像" : "待命";
       } catch {
@@ -2664,8 +2695,7 @@
           currentCameraFault = "";
           setStatus("webcam 畫面已恢復，影像辨識與 MQTT 發送中。", "success");
         }
-        const dataUrl = compositeCanvas.toDataURL("image/jpeg", STREAM_JPEG_QUALITY);
-        const frameBase64 = dataUrl.split(",")[1] || "";
+        const frameBase64 = await canvasToJpegBase64(compositeCanvas, STREAM_JPEG_QUALITY);
         if (frameBase64) {
           lastLineSnapshotBase64 = frameBase64;
           lastLineSnapshotAt = Date.now();
@@ -2709,8 +2739,7 @@
         latestHostItems = items;
         drawItems(items, video.videoWidth, video.videoHeight, fence);
         setDetections(items);
-        const lineSnapshot = captureLineSnapshotBase64(items, fence);
-        maybePublishAlarm(items, fence, lineSnapshot);
+        maybePublishAlarm(items, fence);
         const highestPersonScore = predictions
           .filter((prediction) => prediction.class === "person")
           .reduce((highest, prediction) => Math.max(highest, prediction.score || 0), 0);
@@ -2749,7 +2778,7 @@
       if (!mqttClient || !mqttClient.connected) {
         return;
       }
-      mqttClient.publish(getTopic(), JSON.stringify(buildInactivePayload()), { qos: 1, retain: true });
+      mqttClient.publish(getFrameTopic(), JSON.stringify(buildInactivePayload()), { qos: 1, retain: true });
     }
 
     function startViewerWatchdog() {
@@ -2776,13 +2805,6 @@
           viewerStaleWarningShown = true;
           markViewerFrameStale(elapsed);
         }
-        if (elapsed < FRAME_RECONNECT_MS) {
-          return;
-        }
-        setStatus("長時間沒有收到新畫面，正在強制重新連線 MQTT...", "warning");
-        viewerLastMessageAt = Date.now();
-        viewerStaleWarningShown = false;
-        restartViewerMqttConnection();
       }, 5000);
     }
 
