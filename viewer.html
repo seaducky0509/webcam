@@ -110,14 +110,14 @@
       border: 1px solid var(--border);
       background: #020617;
     }
-    img, canvas {
+    img, video, canvas {
       position: absolute;
       inset: 0;
       width: 100%;
       height: 100%;
       display: block;
     }
-    img { object-fit: cover; background: #020617; }
+    img, video { object-fit: cover; background: #020617; }
     canvas { pointer-events: none; }
     .status { min-height: 24px; font-size: 14px; color: #93c5fd; }
     .status.warning { color: var(--warning); }
@@ -166,7 +166,7 @@
 <body>
   <main>
     <section class="panel">
-      <h1>MQTT 觀看端 <span class="version-badge">版本 20260903.2</span></h1>
+      <h1>MQTT 觀看端 <span class="version-badge">版本 20260903.3</span></h1>
       <p>外網監控端可直接透過 MQTT 接收本機影像、辨識結果與電子圍籬資訊，也能把圍籬與辨識類別設定回傳到主機端。</p>
     </section>
 
@@ -306,6 +306,7 @@
     <section class="panel">
       <div class="stage-shell">
         <div class="stage" id="stage">
+          <video id="liveVideo" autoplay muted playsinline class="hidden"></video>
           <img id="frame" alt="MQTT 影像">
           <canvas id="overlay"></canvas>
         </div>
@@ -329,6 +330,8 @@
           <dd id="deviceState">unknown</dd>
           <dt>接收速率</dt>
           <dd id="frameRateState">0.0 FPS</dd>
+          <dt>影像傳輸</dt>
+          <dd id="transportState">MQTT 影像備援</dd>
           <dt>連線診斷</dt>
           <dd id="connectionDiag">尚未連線</dd>
         </dl>
@@ -424,6 +427,7 @@
     const lineAlertToggle = document.getElementById("lineAlertToggle");
     const lineClearToggle = document.getElementById("lineClearToggle");
     const frame = document.getElementById("frame");
+    const liveVideo = document.getElementById("liveVideo");
     const overlay = document.getElementById("overlay");
     const overlayContext = overlay.getContext("2d");
     const statusText = document.getElementById("status");
@@ -433,6 +437,7 @@
     const modelStateText = document.getElementById("modelState");
     const deviceStateText = document.getElementById("deviceState");
     const frameRateStateText = document.getElementById("frameRateState");
+    const transportStateText = document.getElementById("transportState");
     const connectionDiagText = document.getElementById("connectionDiag");
     const fenceStateText = document.getElementById("fenceState");
     const insideCountStateText = document.getElementById("insideCountState");
@@ -468,6 +473,10 @@
     let closeCount = 0;
     let frameRateWindowStartedAt = performance.now();
     let frameRateWindowCount = 0;
+    let rtcPeer;
+    let rtcRequestTimer;
+    let pendingHostCandidates = [];
+    const rtcViewerId = `viewer-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 
     const localFenceState = {
       enabled: true,
@@ -640,6 +649,103 @@
 
     function getControlTopic() {
       return `${getTopic()}/control`;
+    }
+
+    function getRtcTopic() {
+      return `${getTopic()}/rtc`;
+    }
+
+    function publishRtcSignal(signal) {
+      if (mqttClient?.connected) {
+        mqttClient.publish(getRtcTopic(), JSON.stringify({ ...signal, viewerId: rtcViewerId }), { qos: 0, retain: false });
+      }
+    }
+
+    function closeRtcPeer() {
+      if (rtcPeer) {
+        rtcPeer.ontrack = null;
+        rtcPeer.onicecandidate = null;
+        rtcPeer.close();
+        rtcPeer = undefined;
+      }
+      liveVideo.srcObject = null;
+      liveVideo.classList.add("hidden");
+      frame.classList.remove("hidden");
+      transportStateText.textContent = "MQTT 影像備援";
+      pendingHostCandidates = [];
+    }
+
+    function requestRtcStream() {
+      if (!mqttClient?.connected || rtcPeer?.connectionState === "connected") {
+        return;
+      }
+      publishRtcSignal({ type: "rtc-request" });
+      transportStateText.textContent = "WebRTC 連線中";
+    }
+
+    function startRtcRequests() {
+      if (rtcRequestTimer) {
+        clearInterval(rtcRequestTimer);
+      }
+      requestRtcStream();
+      rtcRequestTimer = window.setInterval(requestRtcStream, 5000);
+    }
+
+    function countRtcFrames() {
+      if (liveVideo.classList.contains("hidden")) {
+        return;
+      }
+      recordFrameArrival();
+      liveVideo.requestVideoFrameCallback?.(countRtcFrames);
+    }
+
+    async function handleRtcSignal(signal) {
+      if (!signal || signal.viewerId !== rtcViewerId) {
+        return;
+      }
+      if (signal.type === "rtc-offer" && signal.sdp) {
+        closeRtcPeer();
+        const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+        rtcPeer = peer;
+        peer.onicecandidate = (event) => {
+          if (event.candidate) {
+            publishRtcSignal({ type: "rtc-candidate", role: "viewer", candidate: event.candidate.toJSON() });
+          }
+        };
+        peer.ontrack = (event) => {
+          liveVideo.srcObject = event.streams[0];
+          liveVideo.classList.remove("hidden");
+          frame.classList.add("hidden");
+          transportStateText.textContent = "WebRTC 即時影像";
+          frameRateWindowStartedAt = performance.now();
+          frameRateWindowCount = 0;
+          liveVideo.play().catch(() => {});
+          liveVideo.requestVideoFrameCallback?.(countRtcFrames);
+        };
+        peer.onconnectionstatechange = () => {
+          if (peer.connectionState === "connected") {
+            transportStateText.textContent = "WebRTC 即時影像";
+          } else if (["failed", "closed"].includes(peer.connectionState)) {
+            closeRtcPeer();
+            requestRtcStream();
+          }
+        };
+        await peer.setRemoteDescription(signal.sdp);
+        for (const candidate of pendingHostCandidates.splice(0)) {
+          await peer.addIceCandidate(candidate).catch(() => {});
+        }
+        const answer = await peer.createAnswer();
+        await peer.setLocalDescription(answer);
+        publishRtcSignal({ type: "rtc-answer", sdp: peer.localDescription });
+        return;
+      }
+      if (signal.type === "rtc-candidate" && signal.role === "host" && signal.candidate) {
+        if (rtcPeer?.remoteDescription) {
+          await rtcPeer.addIceCandidate(signal.candidate).catch(() => {});
+        } else {
+          pendingHostCandidates.push(signal.candidate);
+        }
+      }
     }
 
     function getAlarmTopic() {
@@ -1289,7 +1395,7 @@
         frameRateWindowCount = 0;
         connectionDiagText.textContent = `連線成功｜重連 ${reconnectCount} 次｜關閉 ${closeCount} 次`;
         setStatus(`MQTT 已連線：${topic}`, "success");
-        client.subscribe([getFrameTopic(), getControlTopic(), getAlarmTopic()], { qos: 1 }, (error) => {
+        client.subscribe([getFrameTopic(), getControlTopic(), getAlarmTopic(), getRtcTopic()], { qos: 1 }, (error) => {
           if (client !== mqttClient) {
             return;
           }
@@ -1298,11 +1404,12 @@
             setStatus("MQTT Topic 訂閱失敗。", "error");
           } else {
             mqttStateText.textContent = "已訂閱";
+            startRtcRequests();
           }
         });
       });
 
-      client.on("message", (_topic, message) => {
+      client.on("message", (incomingTopic, message) => {
         if (client !== mqttClient) {
           return;
         }
@@ -1311,6 +1418,12 @@
           parsed = JSON.parse(message.toString());
         } catch {
           parsed = message.toString();
+        }
+        if (incomingTopic === getRtcTopic()) {
+          handleRtcSignal(parsed).catch(() => {
+            closeRtcPeer();
+          });
+          return;
         }
         const payload = normalizePayload(parsed);
         if (!payload) {
@@ -1384,6 +1497,11 @@
 
     function disconnectMqtt() {
       mqttManualDisconnect = true;
+      if (rtcRequestTimer) {
+        clearInterval(rtcRequestTimer);
+        rtcRequestTimer = undefined;
+      }
+      closeRtcPeer();
       if (mqttRestartTimer) {
         clearTimeout(mqttRestartTimer);
         mqttRestartTimer = undefined;

@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260903.2</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260903.3</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -615,7 +615,7 @@
     const STREAM_MAX_WIDTH = 854;
     const STREAM_MAX_HEIGHT = 480;
     const STREAM_JPEG_QUALITY = 0.42;
-    const HOST_SYNC_INTERVAL_MS = 240;
+    const HOST_SYNC_INTERVAL_MS = 1000;
     const INFERENCE_MAX_WIDTH = 480;
     const INFERENCE_MAX_HEIGHT = 270;
     const INFERENCE_INTERVAL_MS = 600;
@@ -770,6 +770,7 @@
     let consecutiveInferenceErrors = 0;
     let lastSuccessfulInferenceAt = 0;
     let inferenceRecoveryInFlight = false;
+    const rtcPeers = new Map();
 
     const LINE_CONFIG_STORAGE_KEY = "mqtt-vision-line-config-v1";
     const HOST_CONTROL_STORAGE_KEY = "mqtt-vision-host-control-v1";
@@ -1017,6 +1018,79 @@
 
     function getControlTopic() {
       return `${getTopic()}/control`;
+    }
+
+    function getRtcTopic() {
+      return `${getTopic()}/rtc`;
+    }
+
+    function publishRtcSignal(signal) {
+      if (mqttClient?.connected) {
+        mqttClient.publish(getRtcTopic(), JSON.stringify(signal), { qos: 0, retain: false });
+      }
+    }
+
+    function closeRtcPeer(viewerId) {
+      const entry = rtcPeers.get(viewerId);
+      if (entry) {
+        entry.peer.close();
+        rtcPeers.delete(viewerId);
+      }
+    }
+
+    function closeAllRtcPeers() {
+      for (const viewerId of rtcPeers.keys()) {
+        closeRtcPeer(viewerId);
+      }
+    }
+
+    async function handleRtcSignal(signal) {
+      const viewerId = String(signal?.viewerId || "");
+      if (!viewerId) {
+        return;
+      }
+      if (signal.type === "rtc-request") {
+        if (!stream?.active) {
+          return;
+        }
+        closeRtcPeer(viewerId);
+        const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+        const entry = { peer, pendingCandidates: [] };
+        rtcPeers.set(viewerId, entry);
+        for (const track of stream.getVideoTracks()) {
+          peer.addTrack(track, stream);
+        }
+        peer.onicecandidate = (event) => {
+          if (event.candidate) {
+            publishRtcSignal({ type: "rtc-candidate", role: "host", viewerId, candidate: event.candidate.toJSON() });
+          }
+        };
+        peer.onconnectionstatechange = () => {
+          if (["failed", "closed"].includes(peer.connectionState)) {
+            closeRtcPeer(viewerId);
+          }
+        };
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+        publishRtcSignal({ type: "rtc-offer", viewerId, sdp: peer.localDescription });
+        return;
+      }
+      const entry = rtcPeers.get(viewerId);
+      if (!entry) {
+        return;
+      }
+      if (signal.type === "rtc-answer" && signal.sdp) {
+        await entry.peer.setRemoteDescription(signal.sdp);
+        for (const candidate of entry.pendingCandidates.splice(0)) {
+          await entry.peer.addIceCandidate(candidate).catch(() => {});
+        }
+      } else if (signal.type === "rtc-candidate" && signal.role === "viewer" && signal.candidate) {
+        if (entry.peer.remoteDescription) {
+          await entry.peer.addIceCandidate(signal.candidate).catch(() => {});
+        } else {
+          entry.pendingCandidates.push(signal.candidate);
+        }
+      }
     }
 
     function getAlarmTopic() {
@@ -1494,6 +1568,7 @@
 
     function releaseWebcamStream() {
       detectionRunning = false;
+      closeAllRtcPeers();
       consecutiveInferenceErrors = 0;
       lastSuccessfulInferenceAt = 0;
       inferenceRecoveryInFlight = false;
@@ -2542,7 +2617,7 @@
           }, HOST_RETAIN_CLEAR_DELAY_MS);
         }
         const subscriptions = mode === "host"
-          ? [getControlTopic()]
+          ? [getControlTopic(), getRtcTopic()]
           : [getFrameTopic(), getControlTopic(), getAlarmTopic()];
         client.subscribe(subscriptions, { qos: 1 }, (error) => {
           if (client !== mqttClient) {
@@ -2557,7 +2632,7 @@
         });
       });
 
-      client.on("message", (_topic, message) => {
+      client.on("message", (incomingTopic, message) => {
         if (client !== mqttClient) {
           return;
         }
@@ -2566,6 +2641,11 @@
           parsed = JSON.parse(message.toString());
         } catch {
           parsed = message.toString();
+        }
+
+        if (incomingTopic === getRtcTopic()) {
+          handleRtcSignal(parsed).catch(() => {});
+          return;
         }
 
         if (parsed && typeof parsed === "object" && parsed.type === "control") {
