@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260902.5</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260903.1</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -726,6 +726,7 @@
     let stream;
     let detectionLoopTimer;
     let framePublishLoopTimer;
+    let framePublishVideoCallback;
     let mqttClient;
     let publishInFlight = false;
     let lastInferenceAt = 0;
@@ -1504,6 +1505,10 @@
       if (framePublishLoopTimer) {
         clearTimeout(framePublishLoopTimer);
         framePublishLoopTimer = undefined;
+      }
+      if (framePublishVideoCallback && video.cancelVideoFrameCallback) {
+        video.cancelVideoFrameCallback(framePublishVideoCallback);
+        framePublishVideoCallback = undefined;
       }
       latestHostItems = [];
       latestDetectionAt = 0;
@@ -2668,6 +2673,18 @@
       }
       if (framePublishLoopTimer) {
         clearTimeout(framePublishLoopTimer);
+        framePublishLoopTimer = undefined;
+      }
+      if (framePublishVideoCallback && video.cancelVideoFrameCallback) {
+        video.cancelVideoFrameCallback(framePublishVideoCallback);
+        framePublishVideoCallback = undefined;
+      }
+      if (video.requestVideoFrameCallback) {
+        framePublishVideoCallback = video.requestVideoFrameCallback(() => {
+          framePublishVideoCallback = undefined;
+          runFramePublishLoop();
+        });
+        return;
       }
       framePublishLoopTimer = window.setTimeout(runFramePublishLoop, delayMs);
     }
