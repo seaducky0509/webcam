@@ -166,7 +166,7 @@
 <body>
   <main>
     <section class="panel">
-      <h1>MQTT 觀看端 <span class="version-badge">版本 20260902.4</span></h1>
+      <h1>MQTT 觀看端 <span class="version-badge">版本 20260902.5</span></h1>
       <p>外網監控端可直接透過 MQTT 接收本機影像、辨識結果與電子圍籬資訊，也能把圍籬與辨識類別設定回傳到主機端。</p>
     </section>
 
@@ -1112,10 +1112,13 @@
       }
       const payloadAge = getPayloadAgeMs(payload);
       if (payloadAge > RETAINED_FRAME_MAX_AGE_MS) {
-        updatedAtText.textContent = formatTaipeiTime(payload.ts);
-        topicStateText.textContent = getTopic();
-        mqttStateText.textContent = "等待新影像";
-        setStatus("收到 MQTT 保留的舊影像，已忽略；正在等待主機端發布新的現場畫面。", "warning");
+        const currentFeedFresh = lastMessageAt && Date.now() - lastMessageAt < STALE_FRAME_WARNING_MS;
+        if (!currentFeedFresh) {
+          updatedAtText.textContent = formatTaipeiTime(payload.ts);
+          topicStateText.textContent = getTopic();
+          mqttStateText.textContent = "等待新影像";
+          setStatus("收到 MQTT 保留的舊影像，已忽略；正在等待主機端發布新的現場畫面。", "warning");
+        }
         return false;
       }
       const incomingFence = normalizeFenceState(payload.fence || localFenceState);

@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260902.4</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260902.5</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -618,7 +618,7 @@
     const HOST_SYNC_INTERVAL_MS = 240;
     const INFERENCE_MAX_WIDTH = 480;
     const INFERENCE_MAX_HEIGHT = 270;
-    const INFERENCE_INTERVAL_MS = 350;
+    const INFERENCE_INTERVAL_MS = 600;
     const JPEG_ENCODE_TIMEOUT_MS = 1500;
     const MQTT_FRAME_BUFFER_LIMIT_BYTES = 320000;
     const ALARM_REPEAT_INTERVAL_MS = 5000;
@@ -2517,15 +2517,6 @@
         connectTimeout: 10000,
         reconnectPeriod: 3000
       };
-      if (mode === "host") {
-        connectOptions.will = {
-          topic: getFrameTopic(),
-          payload: JSON.stringify(buildInactivePayload()),
-          qos: 1,
-          retain: true
-        };
-      }
-
       const client = mqtt.connect(getBrokerUrl(), connectOptions);
       mqttClient = client;
 
@@ -2822,13 +2813,6 @@
         return;
       }
 
-      const now = performance.now();
-      if (now - lastInferenceAt < INFERENCE_INTERVAL_MS) {
-        scheduleNextDetection(30);
-        return;
-      }
-
-      lastInferenceAt = now;
       inferenceStateText.textContent = "辨識中";
 
       try {
@@ -2882,7 +2866,7 @@
       }
 
       if (!inferenceRecoveryInFlight) {
-        scheduleNextDetection(30);
+        scheduleNextDetection(INFERENCE_INTERVAL_MS);
       }
     }
 
@@ -2890,7 +2874,7 @@
       if (!mqttClient || !mqttClient.connected) {
         return;
       }
-      mqttClient.publish(getFrameTopic(), JSON.stringify(buildInactivePayload()), { qos: 1, retain: true });
+      mqttClient.publish(getFrameTopic(), JSON.stringify(buildInactivePayload()), { qos: 0, retain: false });
     }
 
     function startViewerWatchdog() {
