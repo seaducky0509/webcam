@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260903.1</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260903.2</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -620,7 +620,7 @@
     const INFERENCE_MAX_HEIGHT = 270;
     const INFERENCE_INTERVAL_MS = 600;
     const JPEG_ENCODE_TIMEOUT_MS = 1500;
-    const MQTT_FRAME_BUFFER_LIMIT_BYTES = 320000;
+    const MQTT_FRAME_BUFFER_LIMIT_BYTES = 1048576;
     const ALARM_REPEAT_INTERVAL_MS = 5000;
     const DETECTION_RESULT_TTL_MS = 1500;
     const VIEWER_MESSAGE_TIMEOUT_MS = 20000;
@@ -726,7 +726,6 @@
     let stream;
     let detectionLoopTimer;
     let framePublishLoopTimer;
-    let framePublishVideoCallback;
     let mqttClient;
     let publishInFlight = false;
     let lastInferenceAt = 0;
@@ -1505,10 +1504,6 @@
       if (framePublishLoopTimer) {
         clearTimeout(framePublishLoopTimer);
         framePublishLoopTimer = undefined;
-      }
-      if (framePublishVideoCallback && video.cancelVideoFrameCallback) {
-        video.cancelVideoFrameCallback(framePublishVideoCallback);
-        framePublishVideoCallback = undefined;
       }
       latestHostItems = [];
       latestDetectionAt = 0;
@@ -2675,17 +2670,6 @@
         clearTimeout(framePublishLoopTimer);
         framePublishLoopTimer = undefined;
       }
-      if (framePublishVideoCallback && video.cancelVideoFrameCallback) {
-        video.cancelVideoFrameCallback(framePublishVideoCallback);
-        framePublishVideoCallback = undefined;
-      }
-      if (video.requestVideoFrameCallback) {
-        framePublishVideoCallback = video.requestVideoFrameCallback(() => {
-          framePublishVideoCallback = undefined;
-          runFramePublishLoop();
-        });
-        return;
-      }
       framePublishLoopTimer = window.setTimeout(runFramePublishLoop, delayMs);
     }
 
@@ -2716,13 +2700,8 @@
 
     function getMqttBufferedAmount() {
       const streamSocket = mqttClient?.stream?.socket || mqttClient?.stream?._socket || mqttClient?.stream;
-      const values = [
-        streamSocket?.bufferedAmount,
-        streamSocket?.bufferSize,
-        mqttClient?.stream?.writableLength,
-        mqttClient?.queue?.length ? mqttClient.queue.length * 65536 : 0
-      ].filter((value) => Number.isFinite(value));
-      return values.length ? Math.max(...values) : 0;
+      const bufferedAmount = streamSocket?.bufferedAmount;
+      return Number.isFinite(bufferedAmount) ? bufferedAmount : 0;
     }
 
     function canvasToJpegBase64(canvas, quality) {
