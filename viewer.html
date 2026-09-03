@@ -166,7 +166,7 @@
 <body>
   <main>
     <section class="panel">
-      <h1>MQTT 觀看端 <span class="version-badge">版本 20260903.3</span></h1>
+      <h1>MQTT 觀看端 <span class="version-badge">版本 20260903.4</span></h1>
       <p>外網監控端可直接透過 MQTT 接收本機影像、辨識結果與電子圍籬資訊，也能把圍籬與辨識類別設定回傳到主機端。</p>
     </section>
 
@@ -377,6 +377,7 @@
     const params = new URLSearchParams(window.location.search);
     const STALE_FRAME_WARNING_MS = 12000;
     const RETAINED_FRAME_MAX_AGE_MS = 10000;
+    const RTC_DETECTION_TTL_MS = 900;
     const DEFAULT_TOPIC = "vision/seaducky0509/webcam/live01";
     const LEGACY_TOPIC = "vision/demo/cam01";
     const STORE_KEYS = {
@@ -476,6 +477,10 @@
     let rtcPeer;
     let rtcRequestTimer;
     let pendingHostCandidates = [];
+    let rtcDataChannel;
+    let latestRtcDetectionSequence = 0;
+    let lastRtcDetectionReceivedAt = 0;
+    let detectionExpiryTimer;
     const rtcViewerId = `viewer-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 
     const localFenceState = {
@@ -662,6 +667,11 @@
     }
 
     function closeRtcPeer() {
+      if (rtcDataChannel) {
+        rtcDataChannel.onmessage = null;
+        rtcDataChannel.close();
+        rtcDataChannel = undefined;
+      }
       if (rtcPeer) {
         rtcPeer.ontrack = null;
         rtcPeer.onicecandidate = null;
@@ -673,6 +683,66 @@
       frame.classList.remove("hidden");
       transportStateText.textContent = "MQTT 影像備援";
       pendingHostCandidates = [];
+    }
+
+    function scheduleRtcDetectionExpiry() {
+      window.clearTimeout(detectionExpiryTimer);
+      detectionExpiryTimer = window.setTimeout(() => {
+        if (Date.now() - lastRtcDetectionReceivedAt < RTC_DETECTION_TTL_MS) {
+          scheduleRtcDetectionExpiry();
+          return;
+        }
+        latestItems = [];
+        setDetections([]);
+        drawItems([], latestImageSize.width || liveVideo.videoWidth || 640, latestImageSize.height || liveVideo.videoHeight || 360, localFenceState);
+      }, RTC_DETECTION_TTL_MS);
+    }
+
+    function handleRtcDetectionMessage(event) {
+      let payload;
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (payload?.type !== "detection" || Number(payload.sequence || 0) <= latestRtcDetectionSequence) {
+        return;
+      }
+      latestRtcDetectionSequence = Number(payload.sequence);
+      lastRtcDetectionReceivedAt = Date.now();
+      const sourceWidth = Number(payload.source?.width || liveVideo.videoWidth || 0);
+      const sourceHeight = Number(payload.source?.height || liveVideo.videoHeight || 0);
+      const incomingFence = normalizeFenceState(payload.fence || localFenceState);
+      latestFence = incomingFence;
+      localFenceState.enabled = incomingFence.enabled;
+      localFenceState.shape = incomingFence.shape;
+      localFenceState.rect = { ...incomingFence.rect };
+      localFenceState.points = incomingFence.points.map((point) => ({ ...point }));
+      const items = normalizeItems(payload.items || [], sourceWidth, sourceHeight, incomingFence);
+      latestItems = items;
+      latestImageSize = { width: sourceWidth, height: sourceHeight };
+      modelStateText.textContent = `${payload.model || "coco-ssd"} / ${Math.round(payload.inferenceMs || 0)} ms`;
+      setDetections(items);
+      drawItems(items, sourceWidth || 640, sourceHeight || 360, incomingFence);
+      updateAlarmState((payload.fence?.insideCount ?? items.filter((item) => item.insideFence).length) > 0, "");
+      scheduleRtcDetectionExpiry();
+    }
+
+    function attachRtcDataChannel(channel) {
+      if (channel.label !== "detections") {
+        return;
+      }
+      latestRtcDetectionSequence = 0;
+      rtcDataChannel = channel;
+      channel.onmessage = handleRtcDetectionMessage;
+      channel.onopen = () => {
+        transportStateText.textContent = "WebRTC 即時影像 + 即時辨識";
+      };
+      channel.onclose = () => {
+        if (rtcDataChannel === channel) {
+          rtcDataChannel = undefined;
+        }
+      };
     }
 
     function requestRtcStream() {
@@ -707,6 +777,7 @@
         closeRtcPeer();
         const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
         rtcPeer = peer;
+        peer.ondatachannel = (event) => attachRtcDataChannel(event.channel);
         peer.onicecandidate = (event) => {
           if (event.candidate) {
             publishRtcSignal({ type: "rtc-candidate", role: "viewer", candidate: event.candidate.toJSON() });
@@ -1260,8 +1331,12 @@
         syncFenceControlsFromState(localFenceState);
       }
 
-      const items = normalizeItems(payload.detect?.items || [], image.width, image.height, displayFence);
-      latestItems = items;
+      const mqttItems = normalizeItems(payload.detect?.items || [], image.width, image.height, displayFence);
+      const rtcDetectionIsFresh = lastRtcDetectionReceivedAt && Date.now() - lastRtcDetectionReceivedAt < RTC_DETECTION_TTL_MS;
+      const items = rtcDetectionIsFresh ? latestItems : mqttItems;
+      if (!rtcDetectionIsFresh) {
+        latestItems = items;
+      }
       latestImageSize = { width: image.width || 0, height: image.height || 0 };
 
       updatedAtText.textContent = formatTaipeiTime(payload.ts);

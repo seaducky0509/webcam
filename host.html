@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260903.3</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260903.4</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -618,7 +618,7 @@
     const HOST_SYNC_INTERVAL_MS = 1000;
     const INFERENCE_MAX_WIDTH = 480;
     const INFERENCE_MAX_HEIGHT = 270;
-    const INFERENCE_INTERVAL_MS = 600;
+    const INFERENCE_INTERVAL_MS = 80;
     const JPEG_ENCODE_TIMEOUT_MS = 1500;
     const MQTT_FRAME_BUFFER_LIMIT_BYTES = 1048576;
     const ALARM_REPEAT_INTERVAL_MS = 5000;
@@ -771,6 +771,7 @@
     let lastSuccessfulInferenceAt = 0;
     let inferenceRecoveryInFlight = false;
     const rtcPeers = new Map();
+    let rtcDetectionSequence = 0;
 
     const LINE_CONFIG_STORAGE_KEY = "mqtt-vision-line-config-v1";
     const HOST_CONTROL_STORAGE_KEY = "mqtt-vision-host-control-v1";
@@ -1030,6 +1031,27 @@
       }
     }
 
+    function publishRtcDetection(items, fence, sourceWidth, sourceHeight, capturedAt, inferenceMs) {
+      const message = JSON.stringify({
+        type: "detection",
+        sequence: ++rtcDetectionSequence,
+        capturedAt,
+        detectedAt: Date.now(),
+        inferenceMs: Math.round(inferenceMs),
+        source: { width: sourceWidth, height: sourceHeight },
+        model: "coco-ssd",
+        selectedClasses: classNames.filter((name) => selectedClasses.has(name)),
+        items,
+        fence: { ...serializeFence(fence), insideCount: items.filter((item) => item.insideFence).length }
+      });
+      for (const entry of rtcPeers.values()) {
+        const channel = entry.dataChannel;
+        if (channel?.readyState === "open" && channel.bufferedAmount < 65536) {
+          channel.send(message);
+        }
+      }
+    }
+
     function closeRtcPeer(viewerId) {
       const entry = rtcPeers.get(viewerId);
       if (entry) {
@@ -1055,7 +1077,11 @@
         }
         closeRtcPeer(viewerId);
         const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-        const entry = { peer, pendingCandidates: [] };
+        const dataChannel = peer.createDataChannel("detections", {
+          ordered: false,
+          maxRetransmits: 0
+        });
+        const entry = { peer, dataChannel, pendingCandidates: [] };
         rtcPeers.set(viewerId, entry);
         for (const track of stream.getVideoTracks()) {
           peer.addTrack(track, stream);
@@ -2902,7 +2928,10 @@
           inferenceCanvas.height = inferenceHeight;
         }
         inferenceContext.drawImage(video, 0, 0, inferenceWidth, inferenceHeight);
+        const capturedAt = Date.now();
+        const inferenceStartedAt = performance.now();
         const predictions = await detectWithTimeout(inferenceCanvas);
+        const inferenceMs = performance.now() - inferenceStartedAt;
         lastSuccessfulInferenceAt = Date.now();
         clearInferenceRecovery();
         const filtered = predictions.filter((prediction) => prediction.score >= 0.55 && selectedClasses.has(prediction.class));
@@ -2913,6 +2942,7 @@
         drawItems(items, video.videoWidth, video.videoHeight, fence);
         setDetections(items);
         maybePublishAlarm(items, fence);
+        publishRtcDetection(items, fence, sourceWidth, sourceHeight, capturedAt, inferenceMs);
         const highestPersonScore = predictions
           .filter((prediction) => prediction.class === "person")
           .reduce((highest, prediction) => Math.max(highest, prediction.score || 0), 0);
@@ -3134,7 +3164,7 @@
       setStatus("正在載入 coco-ssd 模型...", "info");
       try {
         await tf.ready();
-        model = await cocoSsd.load({ base: "lite_mobilenet_v2" });
+        model = await cocoSsd.load({ base: "mobilenet_v2" });
         const warmupCanvas = document.createElement("canvas");
         warmupCanvas.width = 32;
         warmupCanvas.height = 32;
