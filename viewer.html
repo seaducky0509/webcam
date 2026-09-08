@@ -166,7 +166,7 @@
 <body>
   <main>
     <section class="panel">
-      <h1>MQTT 觀看端 <span class="version-badge">版本 20260903.4</span></h1>
+      <h1>MQTT 觀看端 <span class="version-badge">版本 20260908.1</span></h1>
       <p>外網監控端可直接透過 MQTT 接收本機影像、辨識結果與電子圍籬資訊，也能把圍籬與辨識類別設定回傳到主機端。</p>
     </section>
 
@@ -481,6 +481,8 @@
     let latestRtcDetectionSequence = 0;
     let lastRtcDetectionReceivedAt = 0;
     let detectionExpiryTimer;
+    let rtcFirstFrameTimer;
+    let rtcDecodedFrameSeen = false;
     const rtcViewerId = `viewer-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 
     const localFenceState = {
@@ -667,6 +669,8 @@
     }
 
     function closeRtcPeer() {
+      window.clearTimeout(rtcFirstFrameTimer);
+      rtcDecodedFrameSeen = false;
       if (rtcDataChannel) {
         rtcDataChannel.onmessage = null;
         rtcDataChannel.close();
@@ -762,8 +766,14 @@
     }
 
     function countRtcFrames() {
-      if (liveVideo.classList.contains("hidden")) {
-        return;
+      if (!rtcDecodedFrameSeen) {
+        rtcDecodedFrameSeen = true;
+        window.clearTimeout(rtcFirstFrameTimer);
+        liveVideo.classList.remove("hidden");
+        frame.classList.add("hidden");
+        transportStateText.textContent = rtcDataChannel?.readyState === "open"
+          ? "WebRTC 即時影像 + 即時辨識"
+          : "WebRTC 即時影像";
       }
       recordFrameArrival();
       liveVideo.requestVideoFrameCallback?.(countRtcFrames);
@@ -784,14 +794,25 @@
           }
         };
         peer.ontrack = (event) => {
+          rtcDecodedFrameSeen = false;
           liveVideo.srcObject = event.streams[0];
-          liveVideo.classList.remove("hidden");
-          frame.classList.add("hidden");
-          transportStateText.textContent = "WebRTC 即時影像";
+          liveVideo.classList.add("hidden");
+          frame.classList.remove("hidden");
+          transportStateText.textContent = "WebRTC 等待第一個影格，暫用 MQTT 畫面";
           frameRateWindowStartedAt = performance.now();
           frameRateWindowCount = 0;
           liveVideo.play().catch(() => {});
-          liveVideo.requestVideoFrameCallback?.(countRtcFrames);
+          if (liveVideo.requestVideoFrameCallback) {
+            liveVideo.requestVideoFrameCallback(countRtcFrames);
+          } else {
+            liveVideo.addEventListener("playing", countRtcFrames, { once: true });
+          }
+          window.clearTimeout(rtcFirstFrameTimer);
+          rtcFirstFrameTimer = window.setTimeout(() => {
+            if (!rtcDecodedFrameSeen && rtcPeer === peer) {
+              transportStateText.textContent = "WebRTC 尚未收到影像，繼續顯示 MQTT 備援";
+            }
+          }, 3000);
         };
         peer.onconnectionstatechange = () => {
           if (peer.connectionState === "connected") {
