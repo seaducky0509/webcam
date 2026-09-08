@@ -166,7 +166,7 @@
 <body>
   <main>
     <section class="panel">
-      <h1>MQTT 觀看端 <span class="version-badge">版本 20260908.1</span></h1>
+      <h1>MQTT 觀看端 <span class="version-badge">版本 20260908.2</span></h1>
       <p>外網監控端可直接透過 MQTT 接收本機影像、辨識結果與電子圍籬資訊，也能把圍籬與辨識類別設定回傳到主機端。</p>
     </section>
 
@@ -307,6 +307,7 @@
       <div class="stage-shell">
         <div class="stage" id="stage">
           <video id="liveVideo" autoplay muted playsinline class="hidden"></video>
+          <img id="relayFrame" alt="Tailscale 即時影像" class="hidden">
           <img id="frame" alt="MQTT 影像">
           <canvas id="overlay"></canvas>
         </div>
@@ -428,6 +429,7 @@
     const lineAlertToggle = document.getElementById("lineAlertToggle");
     const lineClearToggle = document.getElementById("lineClearToggle");
     const frame = document.getElementById("frame");
+    const relayFrame = document.getElementById("relayFrame");
     const liveVideo = document.getElementById("liveVideo");
     const overlay = document.getElementById("overlay");
     const overlayContext = overlay.getContext("2d");
@@ -483,6 +485,10 @@
     let detectionExpiryTimer;
     let rtcFirstFrameTimer;
     let rtcDecodedFrameSeen = false;
+    let relaySocket;
+    let relayReconnectTimer;
+    let relayObjectUrl = "";
+    let lastRelayFrameAt = 0;
     const rtcViewerId = `viewer-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 
     const localFenceState = {
@@ -662,6 +668,67 @@
       return `${getTopic()}/rtc`;
     }
 
+    function getTailscaleRelayUrl() {
+      if (params.get("relay")) {
+        return params.get("relay");
+      }
+      if (!window.location.hostname.endsWith(".ts.net")) {
+        return "";
+      }
+      const basePath = window.location.pathname.replace(/\/[^/]*$/, "");
+      return `wss://${window.location.host}${basePath}/live`;
+    }
+
+    function showRelayFrame(data) {
+      const blob = data instanceof Blob ? new Blob([data], { type: "image/jpeg" }) : new Blob([data], { type: "image/jpeg" });
+      const nextUrl = URL.createObjectURL(blob);
+      if (relayObjectUrl) {
+        URL.revokeObjectURL(relayObjectUrl);
+      }
+      relayObjectUrl = nextUrl;
+      relayFrame.onload = () => {
+        lastRelayFrameAt = Date.now();
+        relayFrame.classList.remove("hidden");
+        liveVideo.classList.add("hidden");
+        frame.classList.add("hidden");
+        transportStateText.textContent = "Tailscale 即時影像 + 即時辨識";
+        recordFrameArrival();
+        drawItems(latestItems, latestImageSize.width || relayFrame.naturalWidth, latestImageSize.height || relayFrame.naturalHeight, localFenceState);
+      };
+      relayFrame.src = nextUrl;
+    }
+
+    function connectTailscaleRelay() {
+      const relayUrl = getTailscaleRelayUrl();
+      if (!relayUrl || relaySocket?.readyState === WebSocket.OPEN || relaySocket?.readyState === WebSocket.CONNECTING) {
+        return;
+      }
+      window.clearTimeout(relayReconnectTimer);
+      const url = new URL(relayUrl);
+      url.searchParams.set("role", "viewer");
+      url.searchParams.set("topic", getTopic());
+      const socket = new WebSocket(url);
+      relaySocket = socket;
+      socket.binaryType = "blob";
+      socket.onopen = () => {
+        transportStateText.textContent = "Tailscale 即時通道已連線，等待影像";
+      };
+      socket.onmessage = (event) => {
+        if (typeof event.data === "string") {
+          handleRtcDetectionMessage(event);
+        } else {
+          showRelayFrame(event.data);
+        }
+      };
+      socket.onclose = () => {
+        if (relaySocket === socket) {
+          relaySocket = undefined;
+        }
+        relayReconnectTimer = window.setTimeout(connectTailscaleRelay, 2000);
+      };
+      socket.onerror = () => socket.close();
+    }
+
     function publishRtcSignal(signal) {
       if (mqttClient?.connected) {
         mqttClient.publish(getRtcTopic(), JSON.stringify({ ...signal, viewerId: rtcViewerId }), { qos: 0, retain: false });
@@ -766,6 +833,10 @@
     }
 
     function countRtcFrames() {
+      if (Date.now() - lastRelayFrameAt < 1500) {
+        liveVideo.requestVideoFrameCallback?.(countRtcFrames);
+        return;
+      }
       if (!rtcDecodedFrameSeen) {
         rtcDecodedFrameSeen = true;
         window.clearTimeout(rtcFirstFrameTimer);
@@ -1384,8 +1455,12 @@
         drawFence(image.width || 640, image.height || 360, displayFence);
         return;
       }
-      queueLatestFrameImage(image);
-      recordFrameArrival();
+      if (Date.now() - lastRelayFrameAt >= 1500) {
+        relayFrame.classList.add("hidden");
+        frame.classList.remove("hidden");
+        queueLatestFrameImage(image);
+        recordFrameArrival();
+      }
       return true;
     }
 
@@ -1862,6 +1937,11 @@
       if (mqttClient) {
         mqttClient.end(true);
       }
+      window.clearTimeout(relayReconnectTimer);
+      relaySocket?.close();
+      if (relayObjectUrl) {
+        URL.revokeObjectURL(relayObjectUrl);
+      }
     });
 
     loadViewerControlConfig();
@@ -1870,6 +1950,7 @@
     applyStageSize();
     updateOverlayEditMode();
     connectMqtt();
+    connectTailscaleRelay();
     startWatchdog();
   </script>
 </body>

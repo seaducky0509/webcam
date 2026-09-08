@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260908.1</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260908.2</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -639,6 +639,9 @@
     const CAMERA_RELOAD_ATTEMPTS_KEY = "mqtt-vision-camera-reload-attempts-v1";
     const params = new URLSearchParams(window.location.search);
     const hostname = window.location.hostname;
+    const TAILSCALE_RELAY_URL = params.get("relay") || "wss://lt-desttop-0-159.tail1d7c00.ts.net/webcam/live";
+    const RELAY_FRAME_INTERVAL_MS = 100;
+    const RELAY_JPEG_QUALITY = 0.95;
 
     const video = document.getElementById("webcam");
     const remoteFrame = document.getElementById("remoteFrame");
@@ -772,6 +775,9 @@
     let inferenceRecoveryInFlight = false;
     const rtcPeers = new Map();
     let rtcDetectionSequence = 0;
+    let relaySocket;
+    let relayReconnectTimer;
+    let relayFrameBusy = false;
 
     const LINE_CONFIG_STORAGE_KEY = "mqtt-vision-line-config-v1";
     const HOST_CONTROL_STORAGE_KEY = "mqtt-vision-host-control-v1";
@@ -784,6 +790,8 @@
     const compositeContext = compositeCanvas.getContext("2d");
     const inferenceCanvas = document.createElement("canvas");
     const inferenceContext = inferenceCanvas.getContext("2d", { alpha: false });
+    const relayCanvas = document.createElement("canvas");
+    const relayContext = relayCanvas.getContext("2d", { alpha: false });
     let lastLineSnapshotBase64 = "";
     let lastLineSnapshotAt = 0;
 
@@ -1025,6 +1033,53 @@
       return `${getTopic()}/rtc`;
     }
 
+    function connectTailscaleRelay() {
+      if (!TAILSCALE_RELAY_URL || relaySocket?.readyState === WebSocket.OPEN || relaySocket?.readyState === WebSocket.CONNECTING) {
+        return;
+      }
+      window.clearTimeout(relayReconnectTimer);
+      const url = new URL(TAILSCALE_RELAY_URL);
+      url.searchParams.set("role", "host");
+      url.searchParams.set("topic", getTopic());
+      const socket = new WebSocket(url);
+      relaySocket = socket;
+      socket.onclose = () => {
+        if (relaySocket === socket) {
+          relaySocket = undefined;
+        }
+        relayReconnectTimer = window.setTimeout(connectTailscaleRelay, 2000);
+      };
+      socket.onerror = () => socket.close();
+    }
+
+    function publishRelayDetection(message) {
+      if (relaySocket?.readyState === WebSocket.OPEN && relaySocket.bufferedAmount < 262144) {
+        relaySocket.send(message);
+      }
+    }
+
+    function runRelayFrameLoop() {
+      window.setTimeout(runRelayFrameLoop, RELAY_FRAME_INTERVAL_MS);
+      if (relayFrameBusy || relaySocket?.readyState !== WebSocket.OPEN || relaySocket.bufferedAmount > 2097152 || !detectionRunning || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+        return;
+      }
+      relayFrameBusy = true;
+      if (relayCanvas.width !== video.videoWidth || relayCanvas.height !== video.videoHeight) {
+        relayCanvas.width = video.videoWidth;
+        relayCanvas.height = video.videoHeight;
+      }
+      relayContext.drawImage(video, 0, 0, relayCanvas.width, relayCanvas.height);
+      relayCanvas.toBlob((blob) => {
+        try {
+          if (blob && relaySocket?.readyState === WebSocket.OPEN && relaySocket.bufferedAmount < 2097152) {
+            relaySocket.send(blob);
+          }
+        } finally {
+          relayFrameBusy = false;
+        }
+      }, "image/jpeg", RELAY_JPEG_QUALITY);
+    }
+
     function publishRtcSignal(signal) {
       if (mqttClient?.connected) {
         mqttClient.publish(getRtcTopic(), JSON.stringify(signal), { qos: 0, retain: false });
@@ -1050,6 +1105,7 @@
           channel.send(message);
         }
       }
+      publishRelayDetection(message);
     }
 
     function closeRtcPeer(viewerId) {
@@ -3393,6 +3449,8 @@
     hydrateShareUrls();
     loadModel();
     connectMqtt();
+    connectTailscaleRelay();
+    runRelayFrameLoop();
     startViewerWatchdog();
     clearOverlay();
   </script>
