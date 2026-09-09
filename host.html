@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260909.5</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260909.6</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -644,6 +644,12 @@
     const RELAY_JPEG_QUALITY = 0.95;
     const RELAY_MEDIA_TIMESLICE_MS = 250;
     const RELAY_TRANSPORT = params.get("relayTransport") || "mp4";
+    const TEST_VIDEO_URL = params.get("testVideo") || "";
+    const RTC_CONFIGURATION = {
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      iceCandidatePoolSize: 4,
+      bundlePolicy: "max-bundle"
+    };
 
     const video = document.getElementById("webcam");
     const remoteFrame = document.getElementById("remoteFrame");
@@ -1271,7 +1277,7 @@
           return;
         }
         closeRtcPeer(viewerId);
-        const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+        const peer = new RTCPeerConnection(RTC_CONFIGURATION);
         const dataChannel = peer.createDataChannel("detections", {
           ordered: false,
           maxRetransmits: 0
@@ -1279,7 +1285,18 @@
         const entry = { peer, dataChannel, pendingCandidates: [] };
         rtcPeers.set(viewerId, entry);
         for (const track of stream.getVideoTracks()) {
-          peer.addTrack(track, stream);
+          track.contentHint = "motion";
+          const sender = peer.addTrack(track, stream);
+          const parameters = sender.getParameters();
+          parameters.degradationPreference = "maintain-resolution";
+          parameters.encodings = (parameters.encodings?.length ? parameters.encodings : [{}]).map((encoding) => ({
+            ...encoding,
+            maxBitrate: 6000000,
+            maxFramerate: 30,
+            priority: "high",
+            networkPriority: "high"
+          }));
+          await sender.setParameters(parameters).catch(() => {});
         }
         peer.onicecandidate = (event) => {
           if (event.candidate) {
@@ -1810,6 +1827,11 @@
       }
       stream = undefined;
       video.srcObject = null;
+      if (TEST_VIDEO_URL) {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      }
     }
 
     function scheduleCameraRestart(reason) {
@@ -3288,7 +3310,7 @@
         setStatus("請使用 localhost、HTTPS 或安全 tunnel 來啟動 webcam。", "error");
         return;
       }
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      if (!TEST_VIDEO_URL && (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)) {
         setStatus("這個瀏覽器不支援 webcam。", "error");
         return;
       }
@@ -3306,17 +3328,29 @@
           stream = undefined;
           video.srcObject = null;
         }
-        const videoConstraints = await buildVideoConstraints();
-        stream = await getUserMediaWithTimeout({
-          video: videoConstraints,
-          audio: false
-        });
+        if (TEST_VIDEO_URL) {
+          video.srcObject = null;
+          video.src = TEST_VIDEO_URL;
+          video.loop = true;
+          await video.play();
+          const captureStream = video.captureStream || video.mozCaptureStream;
+          if (!captureStream) {
+            throw new Error("瀏覽器不支援測試影片串流。");
+          }
+          stream = captureStream.call(video);
+        } else {
+          const videoConstraints = await buildVideoConstraints();
+          stream = await getUserMediaWithTimeout({
+            video: videoConstraints,
+            audio: false
+          });
+          video.srcObject = stream;
+          await video.play();
+        }
         if (startGeneration !== webcamStartGeneration) {
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
-        video.srcObject = stream;
-        await video.play();
         clearCameraReloadRecovery();
         resetCameraHealth();
         watchCameraTrack(stream.getVideoTracks()[0]);
@@ -3329,7 +3363,9 @@
         lastSuccessfulInferenceAt = Date.now();
         inferenceRecoveryInFlight = false;
         updateButtons(true);
-        setStatus(automatic ? "webcam 已自動重啟，正在確認現場畫面。" : "webcam 已啟動，影像辨識與 MQTT 發送中。", "success");
+        setStatus(TEST_VIDEO_URL
+          ? "測試影片已啟動，正在驗證辨識與即時傳輸。"
+          : automatic ? "webcam 已自動重啟，正在確認現場畫面。" : "webcam 已啟動，影像辨識與 MQTT 發送中。", "success");
         connectTailscaleRelay();
         runFramePublishLoop();
         runDetectionLoop();

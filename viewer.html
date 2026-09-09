@@ -166,7 +166,7 @@
 <body>
   <main>
     <section class="panel">
-      <h1>MQTT 觀看端 <span class="version-badge">版本 20260909.5</span></h1>
+      <h1>MQTT 觀看端 <span class="version-badge">版本 20260909.6</span></h1>
       <p>外網監控端可直接透過 MQTT 接收本機影像、辨識結果與電子圍籬資訊，也能把圍籬與辨識類別設定回傳到主機端。</p>
     </section>
 
@@ -380,6 +380,11 @@
     const STALE_FRAME_WARNING_MS = 12000;
     const RETAINED_FRAME_MAX_AGE_MS = 10000;
     const RTC_DETECTION_TTL_MS = 900;
+    const RTC_CONFIGURATION = {
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      iceCandidatePoolSize: 4,
+      bundlePolicy: "max-bundle"
+    };
     const DEFAULT_TOPIC = "vision/seaducky0509/webcam/live01";
     const LEGACY_TOPIC = "vision/demo/cam01";
     const STORE_KEYS = {
@@ -487,6 +492,11 @@
     let detectionExpiryTimer;
     let rtcFirstFrameTimer;
     let rtcDecodedFrameSeen = false;
+    let lastRtcFrameAt = 0;
+    let rtcStatsTimer;
+    let rtcFramePollTimer;
+    let rtcStatsPrevious = { at: 0, frames: 0 };
+    let relayFallbackTimer;
     let relaySocket;
     let relayReconnectTimer;
     let relayObjectUrl = "";
@@ -862,7 +872,7 @@
 
     function connectTailscaleRelay() {
       const relayUrl = getTailscaleRelayUrl();
-      if (!relayUrl || relaySocket?.readyState === WebSocket.OPEN || relaySocket?.readyState === WebSocket.CONNECTING) {
+      if (!relayUrl || rtcDecodedFrameSeen || relaySocket?.readyState === WebSocket.OPEN || relaySocket?.readyState === WebSocket.CONNECTING) {
         return;
       }
       window.clearTimeout(relayReconnectTimer);
@@ -873,7 +883,9 @@
       relaySocket = socket;
       socket.binaryType = "blob";
       socket.onopen = () => {
-        transportStateText.textContent = "Tailscale 即時通道已連線，等待影像";
+        if (!rtcDecodedFrameSeen) {
+          transportStateText.textContent = "WebRTC 尚未連線，暫用 Tailscale 影片備援";
+        }
       };
       socket.onmessage = (event) => {
         if (typeof event.data === "string") {
@@ -897,9 +909,40 @@
         if (relaySocket === socket) {
           relaySocket = undefined;
         }
-        relayReconnectTimer = window.setTimeout(connectTailscaleRelay, 2000);
+        if (!rtcDecodedFrameSeen) {
+          relayReconnectTimer = window.setTimeout(connectTailscaleRelay, 2000);
+        }
       };
       socket.onerror = () => socket.close();
+    }
+
+    function disconnectTailscaleRelay() {
+      window.clearTimeout(relayFallbackTimer);
+      window.clearTimeout(relayReconnectTimer);
+      relayFallbackTimer = undefined;
+      relayReconnectTimer = undefined;
+      const socket = relaySocket;
+      relaySocket = undefined;
+      if (socket) {
+        socket.onclose = null;
+        socket.close();
+      }
+      relayMediaActive = false;
+      relayMediaQueue.length = 0;
+      relayVideo.pause();
+      relayVideo.removeAttribute("src");
+      relayVideo.load();
+      relayVideo.classList.add("hidden");
+      relayFrame.classList.add("hidden");
+    }
+
+    function scheduleRelayFallback(delayMs = 8000) {
+      window.clearTimeout(relayFallbackTimer);
+      relayFallbackTimer = window.setTimeout(() => {
+        if (!rtcDecodedFrameSeen) {
+          connectTailscaleRelay();
+        }
+      }, delayMs);
     }
 
     function publishRtcSignal(signal) {
@@ -910,7 +953,11 @@
 
     function closeRtcPeer() {
       window.clearTimeout(rtcFirstFrameTimer);
+      window.clearInterval(rtcStatsTimer);
+      window.clearInterval(rtcFramePollTimer);
       rtcDecodedFrameSeen = false;
+      lastRtcFrameAt = 0;
+      rtcStatsPrevious = { at: 0, frames: 0 };
       if (rtcDataChannel) {
         rtcDataChannel.onmessage = null;
         rtcDataChannel.close();
@@ -990,7 +1037,7 @@
     }
 
     function requestRtcStream() {
-      if (window.location.hostname.endsWith(".ts.net") || !mqttClient?.connected || rtcPeer?.connectionState === "connected") {
+      if (!mqttClient?.connected || rtcPeer?.connectionState === "connected" || rtcPeer?.connectionState === "connecting") {
         return;
       }
       publishRtcSignal({ type: "rtc-request" });
@@ -998,32 +1045,67 @@
     }
 
     function startRtcRequests() {
-      if (window.location.hostname.endsWith(".ts.net")) {
-        return;
-      }
       if (rtcRequestTimer) {
         clearInterval(rtcRequestTimer);
       }
       requestRtcStream();
       rtcRequestTimer = window.setInterval(requestRtcStream, 5000);
+      scheduleRelayFallback();
     }
 
     function countRtcFrames() {
-      if (Date.now() - lastRelayFrameAt < 1500) {
-        liveVideo.requestVideoFrameCallback?.(countRtcFrames);
-        return;
-      }
+      lastRtcFrameAt = Date.now();
       if (!rtcDecodedFrameSeen) {
         rtcDecodedFrameSeen = true;
         window.clearTimeout(rtcFirstFrameTimer);
+        disconnectTailscaleRelay();
         liveVideo.classList.remove("hidden");
+        relayVideo.classList.add("hidden");
+        relayFrame.classList.add("hidden");
         frame.classList.add("hidden");
         transportStateText.textContent = rtcDataChannel?.readyState === "open"
           ? "WebRTC 即時影像 + 即時辨識"
           : "WebRTC 即時影像";
+        updateRtcStats();
+        rtcStatsTimer = window.setInterval(updateRtcStats, 1000);
       }
-      recordFrameArrival();
       liveVideo.requestVideoFrameCallback?.(countRtcFrames);
+    }
+
+    async function updateRtcStats() {
+      if (!rtcPeer || rtcPeer.connectionState !== "connected") {
+        return;
+      }
+      const reports = await rtcPeer.getStats().catch(() => null);
+      if (!reports) {
+        return;
+      }
+      let inbound;
+      let selectedPair;
+      reports.forEach((report) => {
+        if (report.type === "inbound-rtp" && report.kind === "video") {
+          inbound = report;
+        }
+        if (report.type === "candidate-pair" && report.state === "succeeded" && (report.nominated || report.selected)) {
+          selectedPair = report;
+        }
+      });
+      if (!inbound) {
+        return;
+      }
+      const now = performance.now();
+      const frames = Number(inbound.framesDecoded || 0);
+      const elapsed = now - rtcStatsPrevious.at;
+      const measuredFps = rtcStatsPrevious.at && elapsed > 0
+        ? Math.max(0, (frames - rtcStatsPrevious.frames) * 1000 / elapsed)
+        : Number(inbound.framesPerSecond || 0);
+      rtcStatsPrevious = { at: now, frames };
+      const emitted = Number(inbound.jitterBufferEmittedCount || 0);
+      const bufferMs = emitted > 0 ? Number(inbound.jitterBufferDelay || 0) * 1000 / emitted : 0;
+      frameRateStateText.textContent = `${measuredFps.toFixed(1)} FPS｜緩衝 ${Math.round(bufferMs)} ms`;
+      if (selectedPair && Number.isFinite(selectedPair.currentRoundTripTime)) {
+        connectionDiagText.textContent = `WebRTC 已連線｜RTT ${Math.round(selectedPair.currentRoundTripTime * 1000)} ms｜重連 ${reconnectCount} 次`;
+      }
     }
 
     async function handleRtcSignal(signal) {
@@ -1032,7 +1114,7 @@
       }
       if (signal.type === "rtc-offer" && signal.sdp) {
         closeRtcPeer();
-        const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+        const peer = new RTCPeerConnection(RTC_CONFIGURATION);
         rtcPeer = peer;
         peer.ondatachannel = (event) => attachRtcDataChannel(event.channel);
         peer.onicecandidate = (event) => {
@@ -1052,7 +1134,13 @@
           if (liveVideo.requestVideoFrameCallback) {
             liveVideo.requestVideoFrameCallback(countRtcFrames);
           } else {
-            liveVideo.addEventListener("playing", countRtcFrames, { once: true });
+            let lastVideoTime = -1;
+            rtcFramePollTimer = window.setInterval(() => {
+              if (liveVideo.currentTime !== lastVideoTime && !liveVideo.paused) {
+                lastVideoTime = liveVideo.currentTime;
+                countRtcFrames();
+              }
+            }, 100);
           }
           window.clearTimeout(rtcFirstFrameTimer);
           rtcFirstFrameTimer = window.setTimeout(() => {
@@ -1063,10 +1151,11 @@
         };
         peer.onconnectionstatechange = () => {
           if (peer.connectionState === "connected") {
-            transportStateText.textContent = "WebRTC 即時影像";
+            transportStateText.textContent = "WebRTC 已連線，等待第一個即時影格";
           } else if (["failed", "closed"].includes(peer.connectionState)) {
             closeRtcPeer();
             requestRtcStream();
+            scheduleRelayFallback(3000);
           }
         };
         await peer.setRemoteDescription(signal.sdp);
@@ -1370,7 +1459,7 @@
       detectionsList.innerHTML = "";
       if (!items.length) {
         const item = document.createElement("li");
-        item.textContent = "尚未收到辨識資料。";
+        item.textContent = "目前沒有符合條件的物件。";
         detectionsList.appendChild(item);
         insideCountStateText.textContent = "0";
         return;
@@ -1631,7 +1720,8 @@
         drawFence(image.width || 640, image.height || 360, displayFence);
         return;
       }
-      if (Date.now() - lastRelayFrameAt >= 1500) {
+      const rtcVideoIsFresh = rtcDecodedFrameSeen && Date.now() - lastRtcFrameAt < 1500;
+      if (!rtcVideoIsFresh && Date.now() - lastRelayFrameAt >= 1500) {
         relayFrame.classList.add("hidden");
         frame.classList.remove("hidden");
         queueLatestFrameImage(image);
@@ -2126,7 +2216,6 @@
     applyStageSize();
     updateOverlayEditMode();
     connectMqtt();
-    connectTailscaleRelay();
     startWatchdog();
   </script>
 </body>
