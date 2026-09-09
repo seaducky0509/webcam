@@ -166,7 +166,7 @@
 <body>
   <main>
     <section class="panel">
-      <h1>MQTT 觀看端 <span class="version-badge">版本 20260909.2</span></h1>
+      <h1>MQTT 觀看端 <span class="version-badge">版本 20260909.5</span></h1>
       <p>外網監控端可直接透過 MQTT 接收本機影像、辨識結果與電子圍籬資訊，也能把圍籬與辨識類別設定回傳到主機端。</p>
     </section>
 
@@ -307,7 +307,7 @@
       <div class="stage-shell">
         <div class="stage" id="stage">
           <video id="liveVideo" autoplay muted playsinline class="hidden"></video>
-          <video id="relayVideo" autoplay muted playsinline class="hidden"></video>
+          <video id="relayVideo" autoplay muted playsinline preload="auto" disableRemotePlayback class="hidden"></video>
           <img id="relayFrame" alt="Tailscale 即時影像" class="hidden">
           <img id="frame" alt="MQTT 影像">
           <canvas id="overlay"></canvas>
@@ -498,6 +498,10 @@
     let relayMediaChain = Promise.resolve();
     let relayMediaActive = false;
     let relayFrameCounting = false;
+    let relayChunkWindowStartedAt = performance.now();
+    let relayChunkWindowCount = 0;
+    let relayPlaybackTimer;
+    let relayRecoveryTimer;
     const rtcViewerId = `viewer-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 
     const localFenceState = {
@@ -714,14 +718,59 @@
       const chunk = relayMediaQueue.shift();
       try {
         relaySourceBuffer.appendBuffer(chunk);
-      } catch {
+      } catch (error) {
         relayMediaQueue.length = 0;
+        failRelayMedia(`串流資料無法解碼（${error?.name || "appendBuffer"}）`);
       }
     }
 
+    function requestRelayPlayback() {
+      const playPromise = relayVideo.play();
+      if (playPromise?.catch) {
+        playPromise.catch((error) => {
+          transportStateText.textContent = `Tailscale 影片等待播放（${error?.name || "play"}），目前顯示 MQTT 備援截圖`;
+        });
+      }
+    }
+
+    function followRelayLiveEdge() {
+      if (!relayVideo.buffered.length) {
+        return;
+      }
+      const liveEdge = relayVideo.buffered.end(relayVideo.buffered.length - 1);
+      if (Number.isFinite(liveEdge) && liveEdge - relayVideo.currentTime > 1.25) {
+        relayVideo.currentTime = Math.max(0, liveEdge - 0.15);
+      }
+    }
+
+    function failRelayMedia(reason) {
+      if (!relayMediaActive) {
+        return;
+      }
+      relayMediaActive = false;
+      relayMediaQueue.length = 0;
+      window.clearTimeout(relayPlaybackTimer);
+      transportStateText.textContent = `${reason}，目前顯示 MQTT 備援截圖`;
+      relayVideo.classList.add("hidden");
+      if (Date.now() - lastRelayFrameAt >= 1500 && frame.src) {
+        frame.classList.remove("hidden");
+      }
+      window.clearTimeout(relayRecoveryTimer);
+      relayRecoveryTimer = window.setTimeout(() => relaySocket?.close(), 1500);
+    }
+
     function startRelayMedia(mimeType) {
-      if (!window.MediaSource || !MediaSource.isTypeSupported(mimeType)) {
+      relayVideo.disableRemotePlayback = true;
+      relayVideo.muted = true;
+      relayVideo.autoplay = true;
+      relayVideo.playsInline = true;
+      const RelayMediaSource = window.ManagedMediaSource || window.MediaSource;
+      const usingManagedMediaSource = Boolean(window.ManagedMediaSource && RelayMediaSource === window.ManagedMediaSource);
+      const supportsType = RelayMediaSource?.isTypeSupported?.(mimeType)
+        ?? window.MediaSource?.isTypeSupported?.(mimeType);
+      if (!RelayMediaSource || !supportsType) {
         relayMediaActive = false;
+        transportStateText.textContent = `此裝置不支援主機串流格式 ${mimeType}，目前顯示 MQTT 備援截圖`;
         return;
       }
       relayMediaActive = true;
@@ -732,20 +781,37 @@
       if (relayMediaUrl) {
         URL.revokeObjectURL(relayMediaUrl);
       }
-      relayMediaSource = new MediaSource();
+      relayVideo.pause();
+      relayVideo.removeAttribute("src");
+      relayVideo.load();
+      relayMediaSource = new RelayMediaSource();
       relayMediaUrl = URL.createObjectURL(relayMediaSource);
       relayVideo.srcObject = null;
       relayVideo.src = relayMediaUrl;
+      relayVideo.load();
       relayMediaSource.addEventListener("sourceopen", () => {
         if (relayMediaSource?.readyState !== "open") {
           return;
         }
-        relaySourceBuffer = relayMediaSource.addSourceBuffer(mimeType);
-        relaySourceBuffer.mode = "sequence";
-        relaySourceBuffer.addEventListener("updateend", appendRelayMedia);
-        appendRelayMedia();
+        try {
+          relaySourceBuffer = relayMediaSource.addSourceBuffer(mimeType);
+          if (!usingManagedMediaSource) {
+            relaySourceBuffer.mode = "sequence";
+          }
+          relaySourceBuffer.addEventListener("updateend", () => {
+            followRelayLiveEdge();
+            requestRelayPlayback();
+            appendRelayMedia();
+          });
+          relaySourceBuffer.addEventListener("error", () => failRelayMedia("Tailscale 串流緩衝發生錯誤"));
+          appendRelayMedia();
+        } catch (error) {
+          failRelayMedia(`無法建立影片解碼器（${error?.name || "SourceBuffer"}）`);
+        }
       }, { once: true });
+      relayMediaSource.addEventListener("error", () => failRelayMedia("Tailscale 媒體來源發生錯誤"));
       relayVideo.onplaying = () => {
+        window.clearTimeout(relayPlaybackTimer);
         lastRelayFrameAt = Date.now();
         relayVideo.classList.remove("hidden");
         relayFrame.classList.add("hidden");
@@ -757,7 +823,14 @@
           relayVideo.requestVideoFrameCallback(countRelayFrames);
         }
       };
-      relayVideo.play().catch(() => {});
+      relayVideo.onerror = () => failRelayMedia(`影片播放失敗（MediaError ${relayVideo.error?.code || "unknown"}）`);
+      relayPlaybackTimer = window.setTimeout(() => {
+        if (relayMediaActive && relayVideo.paused) {
+          transportStateText.textContent = "Tailscale 串流已收到，但 iPhone 尚未開始播放，目前顯示 MQTT 備援截圖";
+          requestRelayPlayback();
+        }
+      }, 4000);
+      requestRelayPlayback();
     }
 
     function countRelayFrames() {
@@ -766,15 +839,22 @@
         return;
       }
       lastRelayFrameAt = Date.now();
-      recordFrameArrival();
       relayVideo.requestVideoFrameCallback(countRelayFrames);
     }
 
     function queueRelayMedia(data) {
       relayMediaChain = relayMediaChain.then(async () => {
+        relayChunkWindowCount += 1;
+        const now = performance.now();
+        const elapsed = now - relayChunkWindowStartedAt;
+        if (elapsed >= 2000) {
+          frameRateStateText.textContent = `${(relayChunkWindowCount * 1000 / elapsed).toFixed(1)} 影片片段/秒`;
+          relayChunkWindowStartedAt = now;
+          relayChunkWindowCount = 0;
+        }
         relayMediaQueue.push(await data.arrayBuffer());
-        if (relayMediaQueue.length > 12) {
-          relayMediaQueue.splice(0, relayMediaQueue.length - 12);
+        if (relayMediaQueue.length > 24) {
+          relayMediaQueue.splice(1, relayMediaQueue.length - 24);
         }
         appendRelayMedia();
       });

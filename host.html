@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260909.2</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260909.5</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -640,9 +640,10 @@
     const params = new URLSearchParams(window.location.search);
     const hostname = window.location.hostname;
     const TAILSCALE_RELAY_URL = params.get("relay") || "wss://lt-desttop-0-159.tail1d7c00.ts.net/webcam/live";
-    const RELAY_FRAME_INTERVAL_MS = 100;
+    const RELAY_FRAME_INTERVAL_MS = 67;
     const RELAY_JPEG_QUALITY = 0.95;
     const RELAY_MEDIA_TIMESLICE_MS = 250;
+    const RELAY_TRANSPORT = params.get("relayTransport") || "mp4";
 
     const video = document.getElementById("webcam");
     const remoteFrame = document.getElementById("remoteFrame");
@@ -782,6 +783,7 @@
     let relayFrameCallbackId = 0;
     let relayLastFrameAt = 0;
     let relayRecorder;
+    let relayRecorderFlushTimer;
 
     const LINE_CONFIG_STORAGE_KEY = "mqtt-vision-line-config-v1";
     const HOST_CONTROL_STORAGE_KEY = "mqtt-vision-host-control-v1";
@@ -1048,6 +1050,18 @@
       const socket = new WebSocket(url);
       relaySocket = socket;
       socket.onopen = () => startRelayRecorder(socket);
+      socket.onmessage = (event) => {
+        if (typeof event.data !== "string") {
+          return;
+        }
+        try {
+          if (JSON.parse(event.data)?.type === "viewer-ready") {
+            restartRelayRecorder(socket);
+          }
+        } catch {
+          // Ignore unknown relay control messages.
+        }
+      };
       socket.onclose = () => {
         if (relaySocket === socket) {
           relaySocket = undefined;
@@ -1074,6 +1088,8 @@
         relayRecorder.stop();
       }
       relayRecorder = undefined;
+      window.clearInterval(relayRecorderFlushTimer);
+      relayRecorderFlushTimer = undefined;
       const socket = relaySocket;
       relaySocket = undefined;
       if (socket) {
@@ -1083,15 +1099,19 @@
     }
 
     function startRelayRecorder(socket) {
+      if (RELAY_TRANSPORT !== "mp4") {
+        scheduleRelayFrameLoop();
+        return;
+      }
       if (!stream || typeof MediaRecorder === "undefined") {
         scheduleRelayFrameLoop();
         return;
       }
       const mimeTypes = [
-        "video/mp4;codecs=avc1.42E01E",
-        "video/mp4",
         "video/webm;codecs=vp8",
-        "video/webm"
+        "video/webm",
+        "video/mp4;codecs=avc1.42E01E",
+        "video/mp4"
       ];
       const mimeType = mimeTypes.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || "";
       try {
@@ -1103,21 +1123,57 @@
         relayRecorder = recorder;
         socket.send(JSON.stringify({ type: "media-start", mimeType: recorder.mimeType || mimeType || "video/webm" }));
         recorder.ondataavailable = (event) => {
-          if (event.data.size && relaySocket === socket && socket.readyState === WebSocket.OPEN && socket.bufferedAmount < 4194304) {
+          if (relayRecorder === recorder && event.data.size && relaySocket === socket && socket.readyState === WebSocket.OPEN && socket.bufferedAmount < 4194304) {
             socket.send(event.data);
           }
         };
         recorder.onerror = () => {
           if (relayRecorder === recorder) {
             relayRecorder = undefined;
+            window.clearInterval(relayRecorderFlushTimer);
+            relayRecorderFlushTimer = undefined;
             scheduleRelayFrameLoop();
           }
         };
-        recorder.start(RELAY_MEDIA_TIMESLICE_MS);
+        recorder.onstop = () => {
+          window.clearInterval(relayRecorderFlushTimer);
+          relayRecorderFlushTimer = undefined;
+        };
+        if ((recorder.mimeType || mimeType).includes("webm")) {
+          recorder.start(RELAY_MEDIA_TIMESLICE_MS);
+        } else {
+          recorder.start();
+          relayRecorderFlushTimer = window.setInterval(() => {
+            if (relayRecorder === recorder && recorder.state === "recording") {
+              recorder.requestData();
+            }
+          }, RELAY_MEDIA_TIMESLICE_MS);
+        }
       } catch {
         relayRecorder = undefined;
         scheduleRelayFrameLoop();
       }
+    }
+
+    function restartRelayRecorder(socket) {
+      if (RELAY_TRANSPORT !== "mp4") {
+        return;
+      }
+      const previous = relayRecorder;
+      if (!previous || previous.state === "inactive") {
+        startRelayRecorder(socket);
+        return;
+      }
+      relayRecorder = undefined;
+      window.clearInterval(relayRecorderFlushTimer);
+      relayRecorderFlushTimer = undefined;
+      previous.ondataavailable = null;
+      previous.onstop = () => {
+        if (detectionRunning && relaySocket === socket && socket.readyState === WebSocket.OPEN) {
+          startRelayRecorder(socket);
+        }
+      };
+      previous.stop();
     }
 
     function publishRelayDetection(message) {
