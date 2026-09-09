@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260908.2</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260909.2</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -642,6 +642,7 @@
     const TAILSCALE_RELAY_URL = params.get("relay") || "wss://lt-desttop-0-159.tail1d7c00.ts.net/webcam/live";
     const RELAY_FRAME_INTERVAL_MS = 100;
     const RELAY_JPEG_QUALITY = 0.95;
+    const RELAY_MEDIA_TIMESLICE_MS = 250;
 
     const video = document.getElementById("webcam");
     const remoteFrame = document.getElementById("remoteFrame");
@@ -778,6 +779,9 @@
     let relaySocket;
     let relayReconnectTimer;
     let relayFrameBusy = false;
+    let relayFrameCallbackId = 0;
+    let relayLastFrameAt = 0;
+    let relayRecorder;
 
     const LINE_CONFIG_STORAGE_KEY = "mqtt-vision-line-config-v1";
     const HOST_CONTROL_STORAGE_KEY = "mqtt-vision-host-control-v1";
@@ -1034,7 +1038,7 @@
     }
 
     function connectTailscaleRelay() {
-      if (!TAILSCALE_RELAY_URL || relaySocket?.readyState === WebSocket.OPEN || relaySocket?.readyState === WebSocket.CONNECTING) {
+      if (!detectionRunning || !TAILSCALE_RELAY_URL || relaySocket?.readyState === WebSocket.OPEN || relaySocket?.readyState === WebSocket.CONNECTING) {
         return;
       }
       window.clearTimeout(relayReconnectTimer);
@@ -1043,13 +1047,77 @@
       url.searchParams.set("topic", getTopic());
       const socket = new WebSocket(url);
       relaySocket = socket;
+      socket.onopen = () => startRelayRecorder(socket);
       socket.onclose = () => {
         if (relaySocket === socket) {
           relaySocket = undefined;
         }
-        relayReconnectTimer = window.setTimeout(connectTailscaleRelay, 2000);
+        if (detectionRunning) {
+          relayReconnectTimer = window.setTimeout(connectTailscaleRelay, 2000);
+        }
       };
       socket.onerror = () => socket.close();
+    }
+
+    function disconnectTailscaleRelay() {
+      window.clearTimeout(relayReconnectTimer);
+      relayReconnectTimer = undefined;
+      if (relayFrameCallbackId && typeof video.cancelVideoFrameCallback === "function") {
+        video.cancelVideoFrameCallback(relayFrameCallbackId);
+      } else if (relayFrameCallbackId) {
+        window.clearTimeout(relayFrameCallbackId);
+      }
+      relayFrameCallbackId = 0;
+      relayFrameBusy = false;
+      relayLastFrameAt = 0;
+      if (relayRecorder && relayRecorder.state !== "inactive") {
+        relayRecorder.stop();
+      }
+      relayRecorder = undefined;
+      const socket = relaySocket;
+      relaySocket = undefined;
+      if (socket) {
+        socket.onclose = null;
+        socket.close();
+      }
+    }
+
+    function startRelayRecorder(socket) {
+      if (!stream || typeof MediaRecorder === "undefined") {
+        scheduleRelayFrameLoop();
+        return;
+      }
+      const mimeTypes = [
+        "video/mp4;codecs=avc1.42E01E",
+        "video/mp4",
+        "video/webm;codecs=vp8",
+        "video/webm"
+      ];
+      const mimeType = mimeTypes.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || "";
+      try {
+        const options = { videoBitsPerSecond: 6000000 };
+        if (mimeType) {
+          options.mimeType = mimeType;
+        }
+        const recorder = new MediaRecorder(stream, options);
+        relayRecorder = recorder;
+        socket.send(JSON.stringify({ type: "media-start", mimeType: recorder.mimeType || mimeType || "video/webm" }));
+        recorder.ondataavailable = (event) => {
+          if (event.data.size && relaySocket === socket && socket.readyState === WebSocket.OPEN && socket.bufferedAmount < 4194304) {
+            socket.send(event.data);
+          }
+        };
+        recorder.onerror = () => {
+          if (relayRecorder === recorder) {
+            relayRecorder = undefined;
+            scheduleRelayFrameLoop();
+          }
+        };
+        recorder.start(RELAY_MEDIA_TIMESLICE_MS);
+      } catch {
+        relayRecorder = undefined;
+        scheduleRelayFrameLoop();
+      }
     }
 
     function publishRelayDetection(message) {
@@ -1058,11 +1126,26 @@
       }
     }
 
-    function runRelayFrameLoop() {
-      window.setTimeout(runRelayFrameLoop, RELAY_FRAME_INTERVAL_MS);
+    function scheduleRelayFrameLoop() {
+      if (!detectionRunning || !stream) {
+        return;
+      }
+      if (typeof video.requestVideoFrameCallback === "function") {
+        relayFrameCallbackId = video.requestVideoFrameCallback(runRelayFrameLoop);
+      } else {
+        relayFrameCallbackId = window.setTimeout(() => runRelayFrameLoop(performance.now()), RELAY_FRAME_INTERVAL_MS);
+      }
+    }
+
+    function runRelayFrameLoop(now = performance.now()) {
+      scheduleRelayFrameLoop();
+      if (now - relayLastFrameAt < RELAY_FRAME_INTERVAL_MS) {
+        return;
+      }
       if (relayFrameBusy || relaySocket?.readyState !== WebSocket.OPEN || relaySocket.bufferedAmount > 2097152 || !detectionRunning || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
         return;
       }
+      relayLastFrameAt = now;
       relayFrameBusy = true;
       if (relayCanvas.width !== video.videoWidth || relayCanvas.height !== video.videoHeight) {
         relayCanvas.width = video.videoWidth;
@@ -3069,6 +3152,7 @@
     function stopWebcam() {
       webcamAutoRecoveryEnabled = false;
       webcamStartGeneration += 1;
+      disconnectTailscaleRelay();
       releaseWebcamStream();
       resetCameraHealth();
       clearOverlay();
@@ -3190,6 +3274,7 @@
         inferenceRecoveryInFlight = false;
         updateButtons(true);
         setStatus(automatic ? "webcam 已自動重啟，正在確認現場畫面。" : "webcam 已啟動，影像辨識與 MQTT 發送中。", "success");
+        connectTailscaleRelay();
         runFramePublishLoop();
         runDetectionLoop();
         await refreshDiagnostics();
@@ -3449,8 +3534,6 @@
     hydrateShareUrls();
     loadModel();
     connectMqtt();
-    connectTailscaleRelay();
-    runRelayFrameLoop();
     startViewerWatchdog();
     clearOverlay();
   </script>

@@ -166,7 +166,7 @@
 <body>
   <main>
     <section class="panel">
-      <h1>MQTT 觀看端 <span class="version-badge">版本 20260908.2</span></h1>
+      <h1>MQTT 觀看端 <span class="version-badge">版本 20260909.2</span></h1>
       <p>外網監控端可直接透過 MQTT 接收本機影像、辨識結果與電子圍籬資訊，也能把圍籬與辨識類別設定回傳到主機端。</p>
     </section>
 
@@ -307,6 +307,7 @@
       <div class="stage-shell">
         <div class="stage" id="stage">
           <video id="liveVideo" autoplay muted playsinline class="hidden"></video>
+          <video id="relayVideo" autoplay muted playsinline class="hidden"></video>
           <img id="relayFrame" alt="Tailscale 即時影像" class="hidden">
           <img id="frame" alt="MQTT 影像">
           <canvas id="overlay"></canvas>
@@ -430,6 +431,7 @@
     const lineClearToggle = document.getElementById("lineClearToggle");
     const frame = document.getElementById("frame");
     const relayFrame = document.getElementById("relayFrame");
+    const relayVideo = document.getElementById("relayVideo");
     const liveVideo = document.getElementById("liveVideo");
     const overlay = document.getElementById("overlay");
     const overlayContext = overlay.getContext("2d");
@@ -489,6 +491,13 @@
     let relayReconnectTimer;
     let relayObjectUrl = "";
     let lastRelayFrameAt = 0;
+    let relayMediaSource;
+    let relaySourceBuffer;
+    let relayMediaUrl = "";
+    let relayMediaQueue = [];
+    let relayMediaChain = Promise.resolve();
+    let relayMediaActive = false;
+    let relayFrameCounting = false;
     const rtcViewerId = `viewer-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 
     const localFenceState = {
@@ -698,6 +707,79 @@
       relayFrame.src = nextUrl;
     }
 
+    function appendRelayMedia() {
+      if (!relaySourceBuffer || relaySourceBuffer.updating || !relayMediaQueue.length) {
+        return;
+      }
+      const chunk = relayMediaQueue.shift();
+      try {
+        relaySourceBuffer.appendBuffer(chunk);
+      } catch {
+        relayMediaQueue.length = 0;
+      }
+    }
+
+    function startRelayMedia(mimeType) {
+      if (!window.MediaSource || !MediaSource.isTypeSupported(mimeType)) {
+        relayMediaActive = false;
+        return;
+      }
+      relayMediaActive = true;
+      relayFrameCounting = false;
+      relayMediaQueue = [];
+      relayMediaChain = Promise.resolve();
+      relaySourceBuffer = undefined;
+      if (relayMediaUrl) {
+        URL.revokeObjectURL(relayMediaUrl);
+      }
+      relayMediaSource = new MediaSource();
+      relayMediaUrl = URL.createObjectURL(relayMediaSource);
+      relayVideo.srcObject = null;
+      relayVideo.src = relayMediaUrl;
+      relayMediaSource.addEventListener("sourceopen", () => {
+        if (relayMediaSource?.readyState !== "open") {
+          return;
+        }
+        relaySourceBuffer = relayMediaSource.addSourceBuffer(mimeType);
+        relaySourceBuffer.mode = "sequence";
+        relaySourceBuffer.addEventListener("updateend", appendRelayMedia);
+        appendRelayMedia();
+      }, { once: true });
+      relayVideo.onplaying = () => {
+        lastRelayFrameAt = Date.now();
+        relayVideo.classList.remove("hidden");
+        relayFrame.classList.add("hidden");
+        liveVideo.classList.add("hidden");
+        frame.classList.add("hidden");
+        transportStateText.textContent = "Tailscale 高畫質即時影像 + 即時辨識";
+        if (!relayFrameCounting && relayVideo.requestVideoFrameCallback) {
+          relayFrameCounting = true;
+          relayVideo.requestVideoFrameCallback(countRelayFrames);
+        }
+      };
+      relayVideo.play().catch(() => {});
+    }
+
+    function countRelayFrames() {
+      if (!relayMediaActive) {
+        relayFrameCounting = false;
+        return;
+      }
+      lastRelayFrameAt = Date.now();
+      recordFrameArrival();
+      relayVideo.requestVideoFrameCallback(countRelayFrames);
+    }
+
+    function queueRelayMedia(data) {
+      relayMediaChain = relayMediaChain.then(async () => {
+        relayMediaQueue.push(await data.arrayBuffer());
+        if (relayMediaQueue.length > 12) {
+          relayMediaQueue.splice(0, relayMediaQueue.length - 12);
+        }
+        appendRelayMedia();
+      });
+    }
+
     function connectTailscaleRelay() {
       const relayUrl = getTailscaleRelayUrl();
       if (!relayUrl || relaySocket?.readyState === WebSocket.OPEN || relaySocket?.readyState === WebSocket.CONNECTING) {
@@ -715,7 +797,18 @@
       };
       socket.onmessage = (event) => {
         if (typeof event.data === "string") {
+          try {
+            const message = JSON.parse(event.data);
+            if (message?.type === "media-start" && message.mimeType) {
+              startRelayMedia(message.mimeType);
+              return;
+            }
+          } catch {
+            // Detection messages are parsed by the existing handler below.
+          }
           handleRtcDetectionMessage(event);
+        } else if (relayMediaActive) {
+          queueRelayMedia(event.data);
         } else {
           showRelayFrame(event.data);
         }
@@ -817,7 +910,7 @@
     }
 
     function requestRtcStream() {
-      if (!mqttClient?.connected || rtcPeer?.connectionState === "connected") {
+      if (window.location.hostname.endsWith(".ts.net") || !mqttClient?.connected || rtcPeer?.connectionState === "connected") {
         return;
       }
       publishRtcSignal({ type: "rtc-request" });
@@ -825,6 +918,9 @@
     }
 
     function startRtcRequests() {
+      if (window.location.hostname.endsWith(".ts.net")) {
+        return;
+      }
       if (rtcRequestTimer) {
         clearInterval(rtcRequestTimer);
       }
