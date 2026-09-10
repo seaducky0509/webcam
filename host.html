@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260909.7</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260911.1</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -3480,10 +3480,14 @@
         modelStateText.textContent = "就緒";
         setStatus(mqttClient && mqttClient.connected ? "模型已就緒，可啟動 webcam。" : "模型已就緒，請先連線 MQTT 再啟動 webcam。", "success");
         startButton.disabled = false;
-        if (shouldAutoStartAfterReload()) {
-          setStatus("主機頁已重新載入，正在自動續接 webcam...", "info");
-          window.setTimeout(() => startWebcam({ automatic: true }), 300);
-        }
+        // A monitoring host must resume publishing after a browser or page restart.
+        shouldAutoStartAfterReload();
+        setStatus("模型已就緒，正在自動啟動 webcam...", "info");
+        window.setTimeout(() => {
+          if (!detectionRunning && !stream && !cameraRestartInFlight) {
+            startWebcam({ automatic: true });
+          }
+        }, 300);
       } catch {
         modelStateText.textContent = "失敗";
         setStatus("模型載入失敗，請檢查 CDN 是否可用。", "error");
