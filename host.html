@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260909.6</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260909.7</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -790,6 +790,10 @@
     let relayLastFrameAt = 0;
     let relayRecorder;
     let relayRecorderFlushTimer;
+    let cameraFallbackSocket;
+    let cameraFallbackBusy = false;
+    const cameraFallbackCanvas = document.createElement("canvas");
+    const cameraFallbackContext = cameraFallbackCanvas.getContext("2d", { alpha: false });
 
     const LINE_CONFIG_STORAGE_KEY = "mqtt-vision-line-config-v1";
     const HOST_CONTROL_STORAGE_KEY = "mqtt-vision-host-control-v1";
@@ -1825,6 +1829,12 @@
           track.stop();
         }
       }
+      if (cameraFallbackSocket) {
+        cameraFallbackSocket.onclose = null;
+        cameraFallbackSocket.close();
+        cameraFallbackSocket = undefined;
+      }
+      cameraFallbackBusy = false;
       stream = undefined;
       video.srcObject = null;
       if (TEST_VIDEO_URL) {
@@ -1832,6 +1842,57 @@
         video.removeAttribute("src");
         video.load();
       }
+    }
+
+    async function startOpenCvCameraFallback() {
+      const url = new URL(TAILSCALE_RELAY_URL);
+      url.searchParams.set("role", "camera");
+      const socket = new WebSocket(url);
+      cameraFallbackSocket = socket;
+      socket.binaryType = "blob";
+
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        const timeoutId = window.setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            reject(new DOMException("OpenCV 攝影機備援啟動逾時。", "TimeoutError"));
+          }
+        }, WEBCAM_START_TIMEOUT_MS);
+        socket.onerror = () => {
+          if (!settled) {
+            settled = true;
+            window.clearTimeout(timeoutId);
+            reject(new Error("OpenCV 攝影機備援連線失敗。"));
+          }
+        };
+        socket.onmessage = async (event) => {
+          if (cameraFallbackBusy) {
+            return;
+          }
+          cameraFallbackBusy = true;
+          try {
+            const bitmap = await createImageBitmap(event.data);
+            if (cameraFallbackCanvas.width !== bitmap.width || cameraFallbackCanvas.height !== bitmap.height) {
+              cameraFallbackCanvas.width = bitmap.width;
+              cameraFallbackCanvas.height = bitmap.height;
+            }
+            cameraFallbackContext.drawImage(bitmap, 0, 0);
+            bitmap.close();
+            if (!settled) {
+              settled = true;
+              window.clearTimeout(timeoutId);
+              resolve();
+            }
+          } finally {
+            cameraFallbackBusy = false;
+          }
+        };
+      });
+
+      stream = cameraFallbackCanvas.captureStream(30);
+      video.srcObject = stream;
+      await video.play();
     }
 
     function scheduleCameraRestart(reason) {
@@ -3259,7 +3320,7 @@
         return "找不到可用 webcam。";
       }
       if (name === "NotReadableError") {
-        return "webcam 可能被其他程式占用。";
+        return "瀏覽器無法啟動 webcam；已確認裝置存在，請重新整理後再試。";
       }
       if (name === "TimeoutError") {
         return message || "Webcam 啟動逾時，請確認攝影機沒有被其他程式占用。";
@@ -3340,12 +3401,21 @@
           stream = captureStream.call(video);
         } else {
           const videoConstraints = await buildVideoConstraints();
-          stream = await getUserMediaWithTimeout({
-            video: videoConstraints,
-            audio: false
-          });
-          video.srcObject = stream;
-          await video.play();
+          try {
+            stream = await getUserMediaWithTimeout({
+              video: videoConstraints,
+              audio: false
+            });
+          } catch (error) {
+            if (!error || !["NotReadableError", "OverconstrainedError"].includes(error.name)) {
+              throw error;
+            }
+            await startOpenCvCameraFallback();
+          }
+          if (video.srcObject !== stream) {
+            video.srcObject = stream;
+            await video.play();
+          }
         }
         if (startGeneration !== webcamStartGeneration) {
           stream.getTracks().forEach((track) => track.stop());
@@ -3371,6 +3441,11 @@
         runDetectionLoop();
         await refreshDiagnostics();
       } catch (error) {
+        if (stream) {
+          stream.getTracks().forEach((track) => track.stop());
+          stream = undefined;
+        }
+        video.srcObject = null;
         updateButtons(false);
         setStatus(describeError(error), "error");
         await refreshDiagnostics();
