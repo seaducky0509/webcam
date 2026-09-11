@@ -166,7 +166,7 @@
 <body>
   <main>
     <section class="panel">
-      <h1>MQTT 觀看端 <span class="version-badge">版本 20260911.1</span></h1>
+      <h1>MQTT 觀看端 <span class="version-badge">版本 20260911.2</span></h1>
       <p>外網監控端可直接透過 MQTT 接收本機影像、辨識結果與電子圍籬資訊，也能把圍籬與辨識類別設定回傳到主機端。</p>
     </section>
 
@@ -380,6 +380,7 @@
     const STALE_FRAME_WARNING_MS = 12000;
     const RETAINED_FRAME_MAX_AGE_MS = 10000;
     const RTC_DETECTION_TTL_MS = 900;
+    const RTC_FIRST_FRAME_TIMEOUT_MS = 5000;
     const RTC_CONFIGURATION = {
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
       iceCandidatePoolSize: 4,
@@ -495,6 +496,9 @@
     let lastRtcFrameAt = 0;
     let rtcStatsTimer;
     let rtcFramePollTimer;
+    let rtcPlayRetryTimer;
+    let rtcRecoveryTimer;
+    let rtcRecoveryCount = 0;
     let rtcStatsPrevious = { at: 0, frames: 0 };
     let relayFallbackTimer;
     let relaySocket;
@@ -512,6 +516,8 @@
     let relayChunkWindowCount = 0;
     let relayPlaybackTimer;
     let relayRecoveryTimer;
+    let relayPlayRetryTimer;
+    let relayMediaGeneration = 0;
     const rtcViewerId = `viewer-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 
     const localFenceState = {
@@ -734,10 +740,21 @@
       }
     }
 
-    function requestRelayPlayback() {
+    function requestRelayPlayback(generation = relayMediaGeneration) {
+      if (!relayMediaActive || generation !== relayMediaGeneration || relayVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        return;
+      }
       const playPromise = relayVideo.play();
       if (playPromise?.catch) {
         playPromise.catch((error) => {
+          if (!relayMediaActive || generation !== relayMediaGeneration) {
+            return;
+          }
+          if (error?.name === "AbortError") {
+            window.clearTimeout(relayPlayRetryTimer);
+            relayPlayRetryTimer = window.setTimeout(() => requestRelayPlayback(generation), 250);
+            return;
+          }
           transportStateText.textContent = `Tailscale 影片等待播放（${error?.name || "play"}），目前顯示 MQTT 備援截圖`;
         });
       }
@@ -770,6 +787,7 @@
     }
 
     function startRelayMedia(mimeType) {
+      const generation = ++relayMediaGeneration;
       relayVideo.disableRemotePlayback = true;
       relayVideo.muted = true;
       relayVideo.autoplay = true;
@@ -810,7 +828,7 @@
           }
           relaySourceBuffer.addEventListener("updateend", () => {
             followRelayLiveEdge();
-            requestRelayPlayback();
+            requestRelayPlayback(generation);
             appendRelayMedia();
           });
           relaySourceBuffer.addEventListener("error", () => failRelayMedia("Tailscale 串流緩衝發生錯誤"));
@@ -833,14 +851,14 @@
           relayVideo.requestVideoFrameCallback(countRelayFrames);
         }
       };
+      relayVideo.oncanplay = () => requestRelayPlayback(generation);
       relayVideo.onerror = () => failRelayMedia(`影片播放失敗（MediaError ${relayVideo.error?.code || "unknown"}）`);
       relayPlaybackTimer = window.setTimeout(() => {
         if (relayMediaActive && relayVideo.paused) {
           transportStateText.textContent = "Tailscale 串流已收到，但 iPhone 尚未開始播放，目前顯示 MQTT 備援截圖";
-          requestRelayPlayback();
+          requestRelayPlayback(generation);
         }
       }, 4000);
-      requestRelayPlayback();
     }
 
     function countRelayFrames() {
@@ -928,7 +946,10 @@
         socket.close();
       }
       relayMediaActive = false;
+      relayMediaGeneration += 1;
       relayMediaQueue.length = 0;
+      window.clearTimeout(relayPlayRetryTimer);
+      relayVideo.oncanplay = null;
       relayVideo.pause();
       relayVideo.removeAttribute("src");
       relayVideo.load();
@@ -953,6 +974,8 @@
 
     function closeRtcPeer() {
       window.clearTimeout(rtcFirstFrameTimer);
+      window.clearTimeout(rtcPlayRetryTimer);
+      window.clearTimeout(rtcRecoveryTimer);
       window.clearInterval(rtcStatsTimer);
       window.clearInterval(rtcFramePollTimer);
       rtcDecodedFrameSeen = false;
@@ -970,10 +993,33 @@
         rtcPeer = undefined;
       }
       liveVideo.srcObject = null;
+      liveVideo.onloadedmetadata = null;
       liveVideo.classList.add("hidden");
       frame.classList.remove("hidden");
       transportStateText.textContent = "MQTT 影像備援";
       pendingHostCandidates = [];
+    }
+
+    function requestRtcPlayback(peer, attempt = 0) {
+      if (rtcPeer !== peer || !liveVideo.srcObject) {
+        return;
+      }
+      liveVideo.muted = true;
+      liveVideo.autoplay = true;
+      liveVideo.playsInline = true;
+      const playPromise = liveVideo.play();
+      if (!playPromise?.catch) {
+        return;
+      }
+      playPromise.catch((error) => {
+        if (rtcPeer !== peer || !liveVideo.srcObject) {
+          return;
+        }
+        if (["AbortError", "NotAllowedError"].includes(error?.name) && attempt < 12) {
+          window.clearTimeout(rtcPlayRetryTimer);
+          rtcPlayRetryTimer = window.setTimeout(() => requestRtcPlayback(peer, attempt + 1), 250);
+        }
+      });
     }
 
     function scheduleRtcDetectionExpiry() {
@@ -1124,13 +1170,14 @@
         };
         peer.ontrack = (event) => {
           rtcDecodedFrameSeen = false;
-          liveVideo.srcObject = event.streams[0];
+          liveVideo.srcObject = event.streams[0] || new MediaStream([event.track]);
           liveVideo.classList.add("hidden");
           frame.classList.remove("hidden");
           transportStateText.textContent = "WebRTC 等待第一個影格，暫用 MQTT 畫面";
           frameRateWindowStartedAt = performance.now();
           frameRateWindowCount = 0;
-          liveVideo.play().catch(() => {});
+          liveVideo.onloadedmetadata = () => requestRtcPlayback(peer);
+          requestRtcPlayback(peer);
           if (liveVideo.requestVideoFrameCallback) {
             liveVideo.requestVideoFrameCallback(countRtcFrames);
           } else {
@@ -1145,9 +1192,15 @@
           window.clearTimeout(rtcFirstFrameTimer);
           rtcFirstFrameTimer = window.setTimeout(() => {
             if (!rtcDecodedFrameSeen && rtcPeer === peer) {
-              transportStateText.textContent = "WebRTC 尚未收到影像，繼續顯示 MQTT 備援";
+              rtcRecoveryCount += 1;
+              closeRtcPeer();
+              transportStateText.textContent = `WebRTC 零影格，正在重新協商（第 ${rtcRecoveryCount} 次）`;
+              rtcRecoveryTimer = window.setTimeout(() => {
+                requestRtcStream();
+                scheduleRelayFallback(3000);
+              }, 750);
             }
-          }, 3000);
+          }, RTC_FIRST_FRAME_TIMEOUT_MS);
         };
         peer.onconnectionstatechange = () => {
           if (peer.connectionState === "connected") {

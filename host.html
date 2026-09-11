@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260911.1</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260911.2</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -643,7 +643,7 @@
     const RELAY_FRAME_INTERVAL_MS = 67;
     const RELAY_JPEG_QUALITY = 0.95;
     const RELAY_MEDIA_TIMESLICE_MS = 250;
-    const RELAY_TRANSPORT = params.get("relayTransport") || "mp4";
+    const RELAY_TRANSPORT = params.get("relayTransport") || "jpeg";
     const TEST_VIDEO_URL = params.get("testVideo") || "";
     const RTC_CONFIGURATION = {
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -792,6 +792,7 @@
     let relayRecorderFlushTimer;
     let cameraFallbackSocket;
     let cameraFallbackBusy = false;
+    let cameraFallbackTrack;
     const cameraFallbackCanvas = document.createElement("canvas");
     const cameraFallbackContext = cameraFallbackCanvas.getContext("2d", { alpha: false });
 
@@ -1835,6 +1836,7 @@
         cameraFallbackSocket = undefined;
       }
       cameraFallbackBusy = false;
+      cameraFallbackTrack = undefined;
       stream = undefined;
       video.srcObject = null;
       if (TEST_VIDEO_URL) {
@@ -1879,6 +1881,7 @@
             }
             cameraFallbackContext.drawImage(bitmap, 0, 0);
             bitmap.close();
+            cameraFallbackTrack?.requestFrame?.();
             if (!settled) {
               settled = true;
               window.clearTimeout(timeoutId);
@@ -1891,6 +1894,8 @@
       });
 
       stream = cameraFallbackCanvas.captureStream(30);
+      cameraFallbackTrack = stream.getVideoTracks()[0];
+      cameraFallbackTrack?.requestFrame?.();
       video.srcObject = stream;
       await video.play();
     }
