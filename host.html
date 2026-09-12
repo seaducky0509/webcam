@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260911.2</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260912.1</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -1060,14 +1060,26 @@
       url.searchParams.set("topic", getTopic());
       const socket = new WebSocket(url);
       relaySocket = socket;
-      socket.onopen = () => startRelayRecorder(socket);
+      socket.onopen = () => {
+        startRelayRecorder(socket);
+        if (detectionRunning) {
+          publishRunStateText.textContent = "Tailscale 發布中";
+        }
+      };
       socket.onmessage = (event) => {
         if (typeof event.data !== "string") {
           return;
         }
         try {
-          if (JSON.parse(event.data)?.type === "viewer-ready") {
+          const message = JSON.parse(event.data);
+          if (message?.type === "viewer-ready") {
             restartRelayRecorder(socket);
+          } else if (message?.type === "signal-viewer-ready") {
+            publishControlState("");
+          } else if (String(message?.type || "").startsWith("rtc-")) {
+            handleRtcSignal(message).catch(() => {});
+          } else if (message?.type === "control" && message.source !== getDeviceName()) {
+            applyControlPayload(message);
           }
         } catch {
           // Ignore unknown relay control messages.
@@ -1078,6 +1090,7 @@
           relaySocket = undefined;
         }
         if (detectionRunning) {
+          publishRunStateText.textContent = mqttClient?.connected ? "MQTT 發布中" : "等待 Tailscale 重連";
           relayReconnectTimer = window.setTimeout(connectTailscaleRelay, 2000);
         }
       };
@@ -1231,8 +1244,11 @@
     }
 
     function publishRtcSignal(signal) {
-      if (mqttClient?.connected) {
-        mqttClient.publish(getRtcTopic(), JSON.stringify(signal), { qos: 0, retain: false });
+      const message = JSON.stringify(signal);
+      if (relaySocket?.readyState === WebSocket.OPEN && relaySocket.bufferedAmount < 262144) {
+        relaySocket.send(message);
+      } else if (mqttClient?.connected) {
+        mqttClient.publish(getRtcTopic(), message, { qos: 0, retain: false });
       }
     }
 
@@ -2423,11 +2439,18 @@
     }
 
     function publishControlState(statusMessage) {
-      if (!mqttClient || !mqttClient.connected) {
+      const relayConnected = relaySocket?.readyState === WebSocket.OPEN;
+      if ((!mqttClient || !mqttClient.connected) && !relayConnected) {
         return;
       }
       try {
-        mqttClient.publish(getControlTopic(), JSON.stringify(buildControlPayload()), { qos: 1, retain: true });
+        const message = JSON.stringify(buildControlPayload());
+        if (mqttClient?.connected) {
+          mqttClient.publish(getControlTopic(), message, { qos: 1, retain: true });
+        }
+        if (relayConnected && relaySocket.bufferedAmount < 262144) {
+          relaySocket.send(message);
+        }
         if (statusMessage) {
           setStatus(statusMessage, "success");
         }
@@ -3121,6 +3144,9 @@
     async function publishCurrentState(payload) {
       if (!mqttClient || !mqttClient.connected) {
         syncStateText.textContent = "未連線";
+        publishRunStateText.textContent = detectionRunning && relaySocket?.readyState === WebSocket.OPEN
+          ? "Tailscale 發布中"
+          : "等待傳輸通道";
         return;
       }
       if (getMqttBufferedAmount() > MQTT_FRAME_BUFFER_LIMIT_BYTES) {

@@ -166,7 +166,7 @@
 <body>
   <main>
     <section class="panel">
-      <h1>MQTT 觀看端 <span class="version-badge">版本 20260911.2</span></h1>
+      <h1>MQTT 觀看端 <span class="version-badge">版本 20260912.1</span></h1>
       <p>外網監控端可直接透過 MQTT 接收本機影像、辨識結果與電子圍籬資訊，也能把圍籬與辨識類別設定回傳到主機端。</p>
     </section>
 
@@ -195,7 +195,7 @@
     <section class="panel">
       <h2>主機端 webcam 控制</h2>
       <div class="remote-control-grid">
-        <p class="hint">從觀看端遠端要求主機端啟動或停止 webcam。主機端網頁必須保持開啟並已連上相同 MQTT Topic。</p>
+        <p class="hint">從觀看端遠端要求主機端啟動或停止 webcam。主機端網頁必須保持開啟並使用相同 Topic；MQTT 斷線時會改走 Tailscale 控制通道。</p>
         <div class="actions">
           <button id="remoteStartButton" type="button" disabled>啟動主機 webcam</button>
           <button id="remoteStopButton" type="button" class="secondary" disabled>停止主機 webcam</button>
@@ -503,6 +503,8 @@
     let relayFallbackTimer;
     let relaySocket;
     let relayReconnectTimer;
+    let signalSocket;
+    let signalReconnectTimer;
     let relayObjectUrl = "";
     let lastRelayFrameAt = 0;
     let relayMediaSource;
@@ -706,6 +708,50 @@
       }
       const basePath = window.location.pathname.replace(/\/[^/]*$/, "");
       return `wss://${window.location.host}${basePath}/live`;
+    }
+
+    function connectSignalRelay() {
+      const relayUrl = getTailscaleRelayUrl();
+      if (!relayUrl || signalSocket?.readyState === WebSocket.OPEN || signalSocket?.readyState === WebSocket.CONNECTING) {
+        return;
+      }
+      window.clearTimeout(signalReconnectTimer);
+      const url = new URL(relayUrl);
+      url.searchParams.set("role", "viewer-signal");
+      url.searchParams.set("topic", getTopic());
+      const socket = new WebSocket(url);
+      signalSocket = socket;
+      socket.onopen = () => {
+        requestRtcStream();
+        remoteStartButton.disabled = false;
+        remoteStopButton.disabled = false;
+      };
+      socket.onmessage = (event) => {
+        if (typeof event.data !== "string") {
+          return;
+        }
+        try {
+          const message = JSON.parse(event.data);
+          if (String(message?.type || "").startsWith("rtc-")) {
+            handleRtcSignal(message).catch(() => closeRtcPeer());
+          } else if (message?.type === "detection") {
+            handleRtcDetectionMessage(event);
+          } else if (message?.type === "state") {
+            applyControlPayload(message);
+          } else if (message?.type === "alarm") {
+            handleAlarmPayload(message);
+          }
+        } catch {
+          // Ignore malformed relay messages and keep the live channel open.
+        }
+      };
+      socket.onclose = () => {
+        if (signalSocket === socket) {
+          signalSocket = undefined;
+        }
+        signalReconnectTimer = window.setTimeout(connectSignalRelay, 1000);
+      };
+      socket.onerror = () => socket.close();
     }
 
     function showRelayFrame(data) {
@@ -967,8 +1013,11 @@
     }
 
     function publishRtcSignal(signal) {
-      if (mqttClient?.connected) {
-        mqttClient.publish(getRtcTopic(), JSON.stringify({ ...signal, viewerId: rtcViewerId }), { qos: 0, retain: false });
+      const message = JSON.stringify({ ...signal, viewerId: rtcViewerId });
+      if (signalSocket?.readyState === WebSocket.OPEN && signalSocket.bufferedAmount < 262144) {
+        signalSocket.send(message);
+      } else if (mqttClient?.connected) {
+        mqttClient.publish(getRtcTopic(), message, { qos: 0, retain: false });
       }
     }
 
@@ -1083,7 +1132,8 @@
     }
 
     function requestRtcStream() {
-      if (!mqttClient?.connected || rtcPeer?.connectionState === "connected" || rtcPeer?.connectionState === "connecting") {
+      const signalAvailable = mqttClient?.connected || signalSocket?.readyState === WebSocket.OPEN;
+      if (!signalAvailable || rtcPeer?.connectionState === "connected" || rtcPeer?.connectionState === "connecting") {
         return;
       }
       publishRtcSignal({ type: "rtc-request" });
@@ -1593,12 +1643,18 @@
     }
 
     function publishControlState(statusMessage, extraControl = {}) {
-      if (!mqttClient || !mqttClient.connected) {
-        setStatus("請先連線 MQTT，才能送出主機端控制命令。", "warning");
+      const relayConnected = signalSocket?.readyState === WebSocket.OPEN;
+      if ((!mqttClient || !mqttClient.connected) && !relayConnected) {
+        setStatus("控制通道尚未連線，請稍後再試。", "warning");
         return;
       }
       try {
-        mqttClient.publish(getControlTopic(), JSON.stringify(buildControlPayload(extraControl)), { qos: 1, retain: false });
+        const message = JSON.stringify(buildControlPayload(extraControl));
+        if (relayConnected && signalSocket.bufferedAmount < 262144) {
+          signalSocket.send(message);
+        } else if (mqttClient?.connected) {
+          mqttClient.publish(getControlTopic(), message, { qos: 1, retain: false });
+        }
         if (statusMessage) {
           setStatus(statusMessage, "success");
         }
@@ -1987,11 +2043,6 @@
 
     function disconnectMqtt() {
       mqttManualDisconnect = true;
-      if (rtcRequestTimer) {
-        clearInterval(rtcRequestTimer);
-        rtcRequestTimer = undefined;
-      }
-      closeRtcPeer();
       if (mqttRestartTimer) {
         clearTimeout(mqttRestartTimer);
         mqttRestartTimer = undefined;
@@ -2003,8 +2054,8 @@
       mqttStateText.textContent = "未連線";
       connectButton.disabled = false;
       disconnectButton.disabled = true;
-      remoteStartButton.disabled = true;
-      remoteStopButton.disabled = true;
+      remoteStartButton.disabled = signalSocket?.readyState !== WebSocket.OPEN;
+      remoteStopButton.disabled = signalSocket?.readyState !== WebSocket.OPEN;
       brokerInput.disabled = false;
       portInput.disabled = false;
       topicInput.disabled = false;
@@ -2258,6 +2309,11 @@
       }
       window.clearTimeout(relayReconnectTimer);
       relaySocket?.close();
+      window.clearTimeout(signalReconnectTimer);
+      if (signalSocket) {
+        signalSocket.onclose = null;
+        signalSocket.close();
+      }
       if (relayObjectUrl) {
         URL.revokeObjectURL(relayObjectUrl);
       }
@@ -2268,6 +2324,8 @@
     syncFenceControlsFromState(localFenceState);
     applyStageSize();
     updateOverlayEditMode();
+    connectSignalRelay();
+    startRtcRequests();
     connectMqtt();
     startWatchdog();
   </script>
