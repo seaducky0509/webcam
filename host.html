@@ -1259,6 +1259,7 @@
         capturedAt,
         detectedAt: Date.now(),
         inferenceMs: Math.round(inferenceMs),
+        sourceDevice: getDeviceName(),
         source: { width: sourceWidth, height: sourceHeight },
         model: "coco-ssd",
         selectedClasses: classNames.filter((name) => selectedClasses.has(name)),

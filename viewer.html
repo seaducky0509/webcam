@@ -1108,6 +1108,8 @@
       latestItems = items;
       latestImageSize = { width: sourceWidth, height: sourceHeight };
       modelStateText.textContent = `${payload.model || "coco-ssd"} / ${Math.round(payload.inferenceMs || 0)} ms`;
+      updatedAtText.textContent = formatTaipeiTime(new Date(payload.detectedAt || Date.now()).toISOString());
+      deviceStateText.textContent = payload.sourceDevice || "host";
       setDetections(items);
       drawItems(items, sourceWidth || 640, sourceHeight || 360, incomingFence);
       updateAlarmState((payload.fence?.insideCount ?? items.filter((item) => item.insideFence).length) > 0, "");
@@ -2019,13 +2021,17 @@
         connectionDiagText.textContent = `連線已關閉｜重連 ${reconnectCount} 次｜關閉 ${closeCount} 次`;
         connectButton.disabled = false;
         disconnectButton.disabled = true;
-        remoteStartButton.disabled = true;
-        remoteStopButton.disabled = true;
+        remoteStartButton.disabled = signalSocket?.readyState !== WebSocket.OPEN;
+        remoteStopButton.disabled = signalSocket?.readyState !== WebSocket.OPEN;
         brokerInput.disabled = false;
         portInput.disabled = false;
         topicInput.disabled = false;
         if (!mqttManualDisconnect) {
-          setStatus("MQTT 連線中斷，等待自動重連...", "warning");
+          if (rtcDecodedFrameSeen || signalSocket?.readyState === WebSocket.OPEN) {
+            setStatus("MQTT 已中斷；現場影像、辨識與控制仍由 Tailscale / WebRTC 傳輸。", "success");
+          } else {
+            setStatus("MQTT 連線中斷，等待自動重連...", "warning");
+          }
         }
       });
 
