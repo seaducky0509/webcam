@@ -362,7 +362,7 @@
     </section>
 
     <section class="mode-banner" id="modeBanner">
-      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260912.1</span></h2>
+      <h2><span id="modeTitle">MQTT 主機端 / 攝影機發送端</span> <span class="badge">版本 20260914.1</span></h2>
       <div class="mode-status-grid">
         <div class="mode-status-item">
           <span>攝影機</span>
@@ -785,6 +785,7 @@
     let rtcDetectionSequence = 0;
     let relaySocket;
     let relayReconnectTimer;
+    let relayHeartbeatTimer;
     let relayFrameBusy = false;
     let relayFrameCallbackId = 0;
     let relayLastFrameAt = 0;
@@ -1061,6 +1062,18 @@
       const socket = new WebSocket(url);
       relaySocket = socket;
       socket.onopen = () => {
+        window.clearInterval(relayHeartbeatTimer);
+        const sendHeartbeat = () => {
+          if (relaySocket === socket && socket.readyState === WebSocket.OPEN && socket.bufferedAmount < 262144) {
+            socket.send(JSON.stringify({
+              type: "host-heartbeat",
+              ts: new Date().toISOString(),
+              sourceDevice: getDeviceName()
+            }));
+          }
+        };
+        sendHeartbeat();
+        relayHeartbeatTimer = window.setInterval(sendHeartbeat, 3000);
         startRelayRecorder(socket);
         if (detectionRunning) {
           publishRunStateText.textContent = "Tailscale 發布中";
@@ -1086,6 +1099,8 @@
         }
       };
       socket.onclose = () => {
+        window.clearInterval(relayHeartbeatTimer);
+        relayHeartbeatTimer = undefined;
         if (relaySocket === socket) {
           relaySocket = undefined;
         }
@@ -1100,6 +1115,8 @@
     function disconnectTailscaleRelay() {
       window.clearTimeout(relayReconnectTimer);
       relayReconnectTimer = undefined;
+      window.clearInterval(relayHeartbeatTimer);
+      relayHeartbeatTimer = undefined;
       if (relayFrameCallbackId && typeof video.cancelVideoFrameCallback === "function") {
         video.cancelVideoFrameCallback(relayFrameCallbackId);
       } else if (relayFrameCallbackId) {
